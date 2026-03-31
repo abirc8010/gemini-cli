@@ -1,0 +1,29 @@
+[
+  {
+    "task_id": "Significant-Gravitas_AutoGPT_93810570",
+    "status": "FAIL_SHALLOW_FIX",
+    "execution_time": 320.92,
+    "trajectory": {
+      "files_explored": 0,
+      "files_edited": 16
+    }
+  },
+  {
+    "task_id": "freeCodeCamp_freeCodeCamp_f30459a7",
+    "status": "FAIL_WRONG_FILES_TARGETED",
+    "execution_time": 579.6,
+    "trajectory": {
+      "files_explored": 0,
+      "files_edited": 5
+    }
+  },
+  {
+    "task_id": "yt-dlp_yt-dlp_8b275536",
+    "status": "FAIL_SHALLOW_FIX",
+    "execution_time": 249.18,
+    "trajectory": {
+      "files_explored": 0,
+      "files_edited": 2
+    }
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_550fa5a3",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "8528dffbf2f874a98350fb2586184ab1bad18803",
+  "solution_commit": "550fa5a31924e2d03f8d9e99a7e2dcb5e0052e74",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/copilot/executor/processor.py",
+    "autogpt_platform/backend/backend/copilot/sdk/collect.py",
+    "autogpt_platform/backend/backend/copilot/sdk/collect_test.py",
+    "autogpt_platform/backend/backend/copilot/sdk/service.py",
+    "autogpt_platform/backend/backend/copilot/stream_registry.py"
+  ]
+}

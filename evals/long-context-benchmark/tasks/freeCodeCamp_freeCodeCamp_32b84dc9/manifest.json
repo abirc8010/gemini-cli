@@ -1,0 +1,20 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_32b84dc9",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "922e1330130faf69800bed445224f46cc23aea8a",
+  "solution_commit": "32b84dc9266b9b79818d7cb0ab574e1efa724ff0",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "curriculum/challenges/english/blocks/en-b1-quiz-conditionals/696043ed5bea9c7152b6e699.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-describe-places-events/69604103d290e1c4131ab27b.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-express-concerns/69604533db80dd47ad2b3ca0.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-future-continuous-actions/696043b2bbd5b82007ef893d.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-past-activities/696042e15a349be2f4a4579a.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-past-experiences/6960415647143b144f20b94d.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-plan-future-events/696043687613cbc3f7df2413.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-present-perfect-accessibility/696043202e8e8cbd72c2de1b.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-share-feedback/6960442c33cde51b9c78d980.md",
+    "curriculum/challenges/english/blocks/en-b1-quiz-share-opinions/69604468bd3c7564baa4746e.md"
+  ]
+}

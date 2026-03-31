@@ -1,0 +1,13 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_e314ca7b",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "e84ccfe12a9c4e1358b562873742d70f175c2258",
+  "solution_commit": "e314ca7be6149c72c8b83cc9c59c89af2f83a7eb",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "curriculum/challenges/english/blocks/top-the-box-model/64a553ed02815a7d323aab89.md",
+    "curriculum/challenges/english/blocks/top-the-box-model/64a5551d02815a7d323aab8a.md",
+    "curriculum/challenges/english/blocks/top-the-box-model/64a55a6102815a7d323aab8b.md"
+  ]
+}

@@ -1,0 +1,59 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index d6d8dabdb..4ddfb0b15 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -407,23 +407,23 @@ jobs:
+           runner: windows-2025
+           python_version: '3.10'
+           platform_tag: win_amd64
+-          pyi_version: '6.17.0'
+-          pyi_tag: '2025.11.29.054325'
+-          pyi_hash: e28cc13e4ad0cc74330d832202806d0c1976e9165da6047309348ca663c0ed3d
++          pyi_version: '6.18.0'
++          pyi_tag: '2026.01.29.160356'
++          pyi_hash: bb9cd0b0b233e4d031a295211cb8aa7c7f8b3c12ff33f1d57a40849ab4d3cf42
+         - arch: 'x86'
+           runner: windows-2025
+           python_version: '3.10'
+           platform_tag: win32
+-          pyi_version: '6.17.0'
+-          pyi_tag: '2025.11.29.054325'
+-          pyi_hash: c00f600c17de3bdd589f043f60ab64fc34fcba6dd902ad973af9c8afc74f80d1
++          pyi_version: '6.18.0'
++          pyi_tag: '2026.01.29.160356'
++          pyi_hash: aa8f260e735d94f1e2e1aac42e322f508eb54d0433de803c2998c337f72045e4
+         - arch: 'arm64'
+           runner: windows-11-arm
+           python_version: '3.13'  # arm64 only has Python >= 3.11 available
+           platform_tag: win_arm64
+-          pyi_version: '6.17.0'
+-          pyi_tag: '2025.11.29.054325'
+-          pyi_hash: a2033b18b4f7bc6108b5fd76a92c6c1de0a12ec4fe98a23396a9f978cb4b7d7b
++          pyi_version: '6.18.0'
++          pyi_tag: '2026.01.29.160356'
++          pyi_hash: 4bbca67d0cdfa860d92ac9cc7e4c2586fd393d1e814e3f1375b8c62d5cfb6771
+     env:
+       CHANNEL: ${{ inputs.channel }}
+       ORIGIN: ${{ needs.process.outputs.origin }}
+diff --git a/README.md b/README.md
+index 244f8f25a..f07ea38a5 100644
+--- a/README.md
++++ b/README.md
+@@ -213,7 +213,7 @@ ### Strongly recommended
+ 
+     **Important**: What you need is ffmpeg *binary*, **NOT** [the Python package of the same name](https://pypi.org/project/ffmpeg)
+ 
+-* [**yt-dlp-ejs**](https://github.com/yt-dlp/ejs) - Required for deciphering YouTube n/sig values. Licensed under [Unlicense](https://github.com/yt-dlp/ejs/blob/main/LICENSE), bundles [MIT](https://github.com/davidbonnet/astring/blob/main/LICENSE) and [ISC](https://github.com/meriyah/meriyah/blob/main/LICENSE.md) components.
++* [**yt-dlp-ejs**](https://github.com/yt-dlp/ejs) - Required for full YouTube support. Licensed under [Unlicense](https://github.com/yt-dlp/ejs/blob/main/LICENSE), bundles [MIT](https://github.com/davidbonnet/astring/blob/main/LICENSE) and [ISC](https://github.com/meriyah/meriyah/blob/main/LICENSE.md) components.
+ 
+     A JavaScript runtime/engine like [**deno**](https://deno.land) (recommended), [**node.js**](https://nodejs.org), [**bun**](https://bun.sh), or [**QuickJS**](https://bellard.org/quickjs/) is also required to run yt-dlp-ejs. See [the wiki](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+ 
+@@ -1970,7 +1970,7 @@ #### tver
+ * `backend`: Backend API to use for extraction - one of `streaks` (default) or `brightcove` (deprecated)
+ 
+ #### vimeo
+-* `client`: Client to extract video data from. The currently available clients are `android`, `ios`, and `web`. Only one client can be used. The `web` client is used by default. The `web` client only works with account cookies or login credentials. The `android` and `ios` clients only work with previously cached OAuth tokens
++* `client`: Client to extract video data from. The currently available clients are `android`, `ios`, `macos` and `web`. Only one client can be used. The `macos` client is used by default, but the `web` client is used when logged-in. The `web` client only works with account cookies or login credentials. The `android` and `ios` clients only work with previously cached OAuth tokens
+ * `original_format_policy`: Policy for when to try extracting original formats. One of `always`, `never`, or `auto`. The default `auto` policy tries to avoid exceeding the web client's API rate-limit by only making an extra request when Vimeo publicizes the video's downloadability
+ 
+ **Note**: These options may be changed/removed in the future without concern for backward compatibility

@@ -1,0 +1,2264 @@
+diff --git a/autogpt_platform/backend/backend/api/features/admin/store_admin_routes.py b/autogpt_platform/backend/backend/api/features/admin/store_admin_routes.py
+index 6327c266e..c3e6b2d3f 100644
+--- a/autogpt_platform/backend/backend/api/features/admin/store_admin_routes.py
++++ b/autogpt_platform/backend/backend/api/features/admin/store_admin_routes.py
+@@ -7,6 +7,8 @@ import fastapi
+ import fastapi.responses
+ import prisma.enums
+ 
++import backend.api.features.library.db as library_db
++import backend.api.features.library.model as library_model
+ import backend.api.features.store.cache as store_cache
+ import backend.api.features.store.db as store_db
+ import backend.api.features.store.model as store_model
+@@ -132,3 +134,40 @@ async def admin_download_agent_file(
+         return fastapi.responses.FileResponse(
+             tmp_file.name, filename=file_name, media_type="application/json"
+         )
++
++
++@router.get(
++    "/submissions/{store_listing_version_id}/preview",
++    summary="Admin Preview Submission Listing",
++)
++async def admin_preview_submission(
++    store_listing_version_id: str,
++) -> store_model.StoreAgentDetails:
++    """
++    Preview a marketplace submission as it would appear on the listing page.
++    Bypasses the APPROVED-only StoreAgent view so admins can preview pending
++    submissions before approving.
++    """
++    return await store_db.get_store_agent_details_as_admin(store_listing_version_id)
++
++
++@router.post(
++    "/submissions/{store_listing_version_id}/add-to-library",
++    summary="Admin Add Pending Agent to Library",
++    status_code=201,
++)
++async def admin_add_agent_to_library(
++    store_listing_version_id: str,
++    user_id: str = fastapi.Security(autogpt_libs.auth.get_user_id),
++) -> library_model.LibraryAgent:
++    """
++    Add a pending marketplace agent to the admin's library for review.
++    Uses admin-level access to bypass marketplace APPROVED-only checks.
++
++    The builder can load the graph because get_graph() checks library
++    membership as a fallback: "you added it, you keep it."
++    """
++    return await library_db.add_store_agent_to_library_as_admin(
++        store_listing_version_id=store_listing_version_id,
++        user_id=user_id,
++    )
+diff --git a/autogpt_platform/backend/backend/api/features/admin/store_admin_routes_test.py b/autogpt_platform/backend/backend/api/features/admin/store_admin_routes_test.py
+index d52a03fa2..87e1f4ea1 100644
+--- a/autogpt_platform/backend/backend/api/features/admin/store_admin_routes_test.py
++++ b/autogpt_platform/backend/backend/api/features/admin/store_admin_routes_test.py
+@@ -1,14 +1,33 @@
++"""Tests for admin store routes and the bypass logic they depend on.
++
++Tests are organized by what they protect:
++- SECRT-2162: get_graph_as_admin bypasses ownership/marketplace checks
++- SECRT-2167 security: admin endpoints reject non-admin users
++- SECRT-2167 bypass: preview queries StoreListingVersion (not StoreAgent view),
++  and add-to-library uses get_graph_as_admin (not get_graph)
++"""
++
++from datetime import datetime, timezone
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
++import fastapi
++import fastapi.responses
++import fastapi.testclient
+ import pytest
++import pytest_mock
++from autogpt_libs.auth.jwt_utils import get_jwt_payload
+ 
+ from backend.data.graph import get_graph_as_admin
++from backend.util.exceptions import NotFoundError
++
++from .store_admin_routes import router as store_admin_router
+ 
+ # Shared constants
+ ADMIN_USER_ID = "admin-user-id"
+ CREATOR_USER_ID = "other-creator-id"
+ GRAPH_ID = "test-graph-id"
+ GRAPH_VERSION = 3
++SLV_ID = "test-store-listing-version-id"
+ 
+ 
+ def _make_mock_graph(user_id: str = CREATOR_USER_ID) -> MagicMock:
+@@ -20,18 +39,18 @@ def _make_mock_graph(user_id: str = CREATOR_USER_ID) -> MagicMock:
+     return graph
+ 
+ 
++# ---- SECRT-2162: get_graph_as_admin bypasses ownership checks ---- #
++
++
+ @pytest.mark.asyncio
+ async def test_admin_can_access_pending_agent_not_owned() -> None:
+-    """Admin must be able to access a graph they don't own even if it's not
+-    APPROVED in the marketplace. This is the core use case: reviewing a
+-    submitted-but-pending agent from the admin dashboard."""
++    """get_graph_as_admin must return a graph even when the admin doesn't own
++    it and it's not APPROVED in the marketplace."""
+     mock_graph = _make_mock_graph()
+     mock_graph_model = MagicMock(name="GraphModel")
+ 
+     with (
+-        patch(
+-            "backend.data.graph.AgentGraph.prisma",
+-        ) as mock_prisma,
++        patch("backend.data.graph.AgentGraph.prisma") as mock_prisma,
+         patch(
+             "backend.data.graph.GraphModel.from_db",
+             return_value=mock_graph_model,
+@@ -46,25 +65,19 @@ async def test_admin_can_access_pending_agent_not_owned() -> None:
+             for_export=False,
+         )
+ 
+-    assert (
+-        result is not None
+-    ), "Admin should be able to access a pending agent they don't own"
+     assert result is mock_graph_model
+ 
+ 
+ @pytest.mark.asyncio
+ async def test_admin_download_pending_agent_with_subagents() -> None:
+-    """Admin export (for_export=True) of a pending agent must include
+-    sub-graphs. This exercises the full export code path that the Download
+-    button uses."""
++    """get_graph_as_admin with for_export=True must call get_sub_graphs
++    and pass sub_graphs to GraphModel.from_db."""
+     mock_graph = _make_mock_graph()
+     mock_sub_graph = MagicMock(name="SubGraph")
+     mock_graph_model = MagicMock(name="GraphModel")
+ 
+     with (
+-        patch(
+-            "backend.data.graph.AgentGraph.prisma",
+-        ) as mock_prisma,
++        patch("backend.data.graph.AgentGraph.prisma") as mock_prisma,
+         patch(
+             "backend.data.graph.get_sub_graphs",
+             new_callable=AsyncMock,
+@@ -84,10 +97,239 @@ async def test_admin_download_pending_agent_with_subagents() -> None:
+             for_export=True,
+         )
+ 
+-    assert result is not None, "Admin export of pending agent must succeed"
++    assert result is mock_graph_model
+     mock_get_sub.assert_awaited_once_with(mock_graph)
+     mock_from_db.assert_called_once_with(
+         graph=mock_graph,
+         sub_graphs=[mock_sub_graph],
+         for_export=True,
+     )
++
++
++# ---- SECRT-2167 security: admin endpoints reject non-admin users ---- #
++
++app = fastapi.FastAPI()
++app.include_router(store_admin_router)
++
++
++@app.exception_handler(NotFoundError)
++async def _not_found_handler(
++    request: fastapi.Request, exc: NotFoundError
++) -> fastapi.responses.JSONResponse:
++    return fastapi.responses.JSONResponse(status_code=404, content={"detail": str(exc)})
++
++
++client = fastapi.testclient.TestClient(app)
++
++
++@pytest.fixture(autouse=True)
++def setup_app_admin_auth(mock_jwt_admin):
++    """Setup admin auth overrides for all route tests in this module."""
++    app.dependency_overrides[get_jwt_payload] = mock_jwt_admin["get_jwt_payload"]
++    yield
++    app.dependency_overrides.clear()
++
++
++def test_preview_requires_admin(mock_jwt_user) -> None:
++    """Non-admin users must get 403 on the preview endpoint."""
++    app.dependency_overrides[get_jwt_payload] = mock_jwt_user["get_jwt_payload"]
++    response = client.get(f"/admin/submissions/{SLV_ID}/preview")
++    assert response.status_code == 403
++
++
++def test_add_to_library_requires_admin(mock_jwt_user) -> None:
++    """Non-admin users must get 403 on the add-to-library endpoint."""
++    app.dependency_overrides[get_jwt_payload] = mock_jwt_user["get_jwt_payload"]
++    response = client.post(f"/admin/submissions/{SLV_ID}/add-to-library")
++    assert response.status_code == 403
++
++
++def test_preview_nonexistent_submission(
++    mocker: pytest_mock.MockerFixture,
++) -> None:
++    """Preview of a nonexistent submission returns 404."""
++    mocker.patch(
++        "backend.api.features.admin.store_admin_routes.store_db"
++        ".get_store_agent_details_as_admin",
++        side_effect=NotFoundError("not found"),
++    )
++    response = client.get(f"/admin/submissions/{SLV_ID}/preview")
++    assert response.status_code == 404
++
++
++# ---- SECRT-2167 bypass: verify the right data sources are used ---- #
++
++
++@pytest.mark.asyncio
++async def test_preview_queries_store_listing_version_not_store_agent() -> None:
++    """get_store_agent_details_as_admin must query StoreListingVersion
++    directly (not the APPROVED-only StoreAgent view). This is THE test that
++    prevents the bypass from being accidentally reverted."""
++    from backend.api.features.store.db import get_store_agent_details_as_admin
++
++    mock_slv = MagicMock()
++    mock_slv.id = SLV_ID
++    mock_slv.name = "Test Agent"
++    mock_slv.subHeading = "Short desc"
++    mock_slv.description = "Long desc"
++    mock_slv.videoUrl = None
++    mock_slv.agentOutputDemoUrl = None
++    mock_slv.imageUrls = ["https://example.com/img.png"]
++    mock_slv.instructions = None
++    mock_slv.categories = ["productivity"]
++    mock_slv.version = 1
++    mock_slv.agentGraphId = GRAPH_ID
++    mock_slv.agentGraphVersion = GRAPH_VERSION
++    mock_slv.updatedAt = datetime(2026, 3, 24, tzinfo=timezone.utc)
++    mock_slv.recommendedScheduleCron = "0 9 * * *"
++
++    mock_listing = MagicMock()
++    mock_listing.id = "listing-id"
++    mock_listing.slug = "test-agent"
++    mock_listing.activeVersionId = SLV_ID
++    mock_listing.hasApprovedVersion = False
++    mock_listing.CreatorProfile = MagicMock(username="creator", avatarUrl="")
++    mock_slv.StoreListing = mock_listing
++
++    with (
++        patch(
++            "backend.api.features.store.db.prisma.models" ".StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch(
++            "backend.api.features.store.db.prisma.models.StoreAgent.prisma",
++        ) as mock_store_agent_prisma,
++    ):
++        mock_slv_prisma.return_value.find_unique = AsyncMock(return_value=mock_slv)
++
++        result = await get_store_agent_details_as_admin(SLV_ID)
++
++    # Verify it queried StoreListingVersion (not the APPROVED-only StoreAgent)
++    mock_slv_prisma.return_value.find_unique.assert_awaited_once()
++    await_args = mock_slv_prisma.return_value.find_unique.await_args
++    assert await_args is not None
++    assert await_args.kwargs["where"] == {"id": SLV_ID}
++
++    # Verify the APPROVED-only StoreAgent view was NOT touched
++    mock_store_agent_prisma.assert_not_called()
++
++    # Verify the result has the right data
++    assert result.agent_name == "Test Agent"
++    assert result.agent_image == ["https://example.com/img.png"]
++    assert result.has_approved_version is False
++    assert result.runs == 0
++    assert result.rating == 0.0
++
++
++@pytest.mark.asyncio
++async def test_resolve_graph_admin_uses_get_graph_as_admin() -> None:
++    """resolve_graph_for_library(admin=True) must call get_graph_as_admin,
++    not get_graph. This is THE test that prevents the add-to-library bypass
++    from being accidentally reverted."""
++    from backend.api.features.library._add_to_library import resolve_graph_for_library
++
++    mock_slv = MagicMock()
++    mock_slv.AgentGraph = MagicMock(id=GRAPH_ID, version=GRAPH_VERSION)
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    with (
++        patch(
++            "backend.api.features.library._add_to_library.prisma.models"
++            ".StoreListingVersion.prisma",
++        ) as mock_prisma,
++        patch(
++            "backend.api.features.library._add_to_library.graph_db"
++            ".get_graph_as_admin",
++            new_callable=AsyncMock,
++            return_value=mock_graph_model,
++        ) as mock_admin,
++        patch(
++            "backend.api.features.library._add_to_library.graph_db.get_graph",
++            new_callable=AsyncMock,
++        ) as mock_regular,
++    ):
++        mock_prisma.return_value.find_unique = AsyncMock(return_value=mock_slv)
++
++        result = await resolve_graph_for_library(SLV_ID, ADMIN_USER_ID, admin=True)
++
++    assert result is mock_graph_model
++    mock_admin.assert_awaited_once_with(
++        graph_id=GRAPH_ID, version=GRAPH_VERSION, user_id=ADMIN_USER_ID
++    )
++    mock_regular.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_resolve_graph_regular_uses_get_graph() -> None:
++    """resolve_graph_for_library(admin=False) must call get_graph,
++    not get_graph_as_admin. Ensures the non-admin path is preserved."""
++    from backend.api.features.library._add_to_library import resolve_graph_for_library
++
++    mock_slv = MagicMock()
++    mock_slv.AgentGraph = MagicMock(id=GRAPH_ID, version=GRAPH_VERSION)
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    with (
++        patch(
++            "backend.api.features.library._add_to_library.prisma.models"
++            ".StoreListingVersion.prisma",
++        ) as mock_prisma,
++        patch(
++            "backend.api.features.library._add_to_library.graph_db"
++            ".get_graph_as_admin",
++            new_callable=AsyncMock,
++        ) as mock_admin,
++        patch(
++            "backend.api.features.library._add_to_library.graph_db.get_graph",
++            new_callable=AsyncMock,
++            return_value=mock_graph_model,
++        ) as mock_regular,
++    ):
++        mock_prisma.return_value.find_unique = AsyncMock(return_value=mock_slv)
++
++        result = await resolve_graph_for_library(SLV_ID, "regular-user-id", admin=False)
++
++    assert result is mock_graph_model
++    mock_regular.assert_awaited_once_with(
++        graph_id=GRAPH_ID, version=GRAPH_VERSION, user_id="regular-user-id"
++    )
++    mock_admin.assert_not_awaited()
++
++
++# ---- Library membership grants graph access (product decision) ---- #
++
++
++@pytest.mark.asyncio
++async def test_library_member_can_view_pending_agent_in_builder() -> None:
++    """After adding a pending agent to their library, the user should be
++    able to load the graph in the builder via get_graph()."""
++    mock_graph = _make_mock_graph()
++    mock_graph_model = MagicMock(name="GraphModel")
++    mock_library_agent = MagicMock()
++    mock_library_agent.AgentGraph = mock_graph
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_lib_prisma.return_value.find_first = AsyncMock(
++            return_value=mock_library_agent
++        )
++
++        from backend.data.graph import get_graph
++
++        result = await get_graph(
++            graph_id=GRAPH_ID,
++            version=GRAPH_VERSION,
++            user_id=ADMIN_USER_ID,
++        )
++
++    assert result is mock_graph_model, "Library membership should grant graph access"
+diff --git a/autogpt_platform/backend/backend/api/features/library/_add_to_library.py b/autogpt_platform/backend/backend/api/features/library/_add_to_library.py
+new file mode 100644
+index 000000000..8bfa1c647
+--- /dev/null
++++ b/autogpt_platform/backend/backend/api/features/library/_add_to_library.py
+@@ -0,0 +1,124 @@
++"""Shared logic for adding store agents to a user's library.
++
++Both `add_store_agent_to_library` and `add_store_agent_to_library_as_admin`
++delegate to these helpers so the duplication-prone create/restore/dedup
++logic lives in exactly one place.
++"""
++
++import logging
++
++import prisma.errors
++import prisma.models
++
++import backend.api.features.library.model as library_model
++import backend.data.graph as graph_db
++from backend.data.graph import GraphModel, GraphSettings
++from backend.data.includes import library_agent_include
++from backend.util.exceptions import NotFoundError
++from backend.util.json import SafeJson
++
++from .db import get_library_agent_by_graph_id, update_library_agent
++
++logger = logging.getLogger(__name__)
++
++
++async def resolve_graph_for_library(
++    store_listing_version_id: str,
++    user_id: str,
++    *,
++    admin: bool,
++) -> GraphModel:
++    """Look up a StoreListingVersion and resolve its graph.
++
++    When ``admin=True``, uses ``get_graph_as_admin`` to bypass the marketplace
++    APPROVED-only check.  Otherwise uses the regular ``get_graph``.
++    """
++    slv = await prisma.models.StoreListingVersion.prisma().find_unique(
++        where={"id": store_listing_version_id}, include={"AgentGraph": True}
++    )
++    if not slv or not slv.AgentGraph:
++        raise NotFoundError(
++            f"Store listing version {store_listing_version_id} not found or invalid"
++        )
++
++    ag = slv.AgentGraph
++    if admin:
++        graph_model = await graph_db.get_graph_as_admin(
++            graph_id=ag.id, version=ag.version, user_id=user_id
++        )
++    else:
++        graph_model = await graph_db.get_graph(
++            graph_id=ag.id, version=ag.version, user_id=user_id
++        )
++
++    if not graph_model:
++        raise NotFoundError(f"Graph #{ag.id} v{ag.version} not found or accessible")
++    return graph_model
++
++
++async def add_graph_to_library(
++    store_listing_version_id: str,
++    graph_model: GraphModel,
++    user_id: str,
++) -> library_model.LibraryAgent:
++    """Check existing / restore soft-deleted / create new LibraryAgent."""
++    if existing := await get_library_agent_by_graph_id(
++        user_id, graph_model.id, graph_model.version
++    ):
++        return existing
++
++    deleted_agent = await prisma.models.LibraryAgent.prisma().find_unique(
++        where={
++            "userId_agentGraphId_agentGraphVersion": {
++                "userId": user_id,
++                "agentGraphId": graph_model.id,
++                "agentGraphVersion": graph_model.version,
++            }
++        },
++    )
++    if deleted_agent and (deleted_agent.isDeleted or deleted_agent.isArchived):
++        return await update_library_agent(
++            deleted_agent.id,
++            user_id,
++            is_deleted=False,
++            is_archived=False,
++        )
++
++    try:
++        added_agent = await prisma.models.LibraryAgent.prisma().create(
++            data={
++                "User": {"connect": {"id": user_id}},
++                "AgentGraph": {
++                    "connect": {
++                        "graphVersionId": {
++                            "id": graph_model.id,
++                            "version": graph_model.version,
++                        }
++                    }
++                },
++                "isCreatedByUser": False,
++                "useGraphIsActiveVersion": False,
++                "settings": SafeJson(
++                    GraphSettings.from_graph(graph_model).model_dump()
++                ),
++            },
++            include=library_agent_include(
++                user_id, include_nodes=False, include_executions=False
++            ),
++        )
++    except prisma.errors.UniqueViolationError:
++        # Race condition: concurrent request created the row between our
++        # check and create.  Re-read instead of crashing.
++        existing = await get_library_agent_by_graph_id(
++            user_id, graph_model.id, graph_model.version
++        )
++        if existing:
++            return existing
++        raise  # Shouldn't happen, but don't swallow unexpected errors
++
++    logger.debug(
++        f"Added graph #{graph_model.id} v{graph_model.version} "
++        f"for store listing version #{store_listing_version_id} "
++        f"to library for user #{user_id}"
++    )
++    return library_model.LibraryAgent.from_db(added_agent)
+diff --git a/autogpt_platform/backend/backend/api/features/library/_add_to_library_test.py b/autogpt_platform/backend/backend/api/features/library/_add_to_library_test.py
+new file mode 100644
+index 000000000..53272a1f8
+--- /dev/null
++++ b/autogpt_platform/backend/backend/api/features/library/_add_to_library_test.py
+@@ -0,0 +1,71 @@
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++from ._add_to_library import add_graph_to_library
++
++
++@pytest.mark.asyncio
++async def test_add_graph_to_library_restores_archived_agent() -> None:
++    graph_model = MagicMock(id="graph-id", version=2)
++    archived_agent = MagicMock(id="library-agent-id", isDeleted=False, isArchived=True)
++    restored_agent = MagicMock(name="LibraryAgentModel")
++
++    with (
++        patch(
++            "backend.api.features.library._add_to_library.get_library_agent_by_graph_id",
++            new=AsyncMock(return_value=None),
++        ),
++        patch(
++            "backend.api.features.library._add_to_library.prisma.models.LibraryAgent.prisma"
++        ) as mock_prisma,
++        patch(
++            "backend.api.features.library._add_to_library.update_library_agent",
++            new=AsyncMock(return_value=restored_agent),
++        ) as mock_update,
++    ):
++        mock_prisma.return_value.find_unique = AsyncMock(return_value=archived_agent)
++
++        result = await add_graph_to_library("slv-id", graph_model, "user-id")
++
++    assert result is restored_agent
++    mock_update.assert_awaited_once_with(
++        "library-agent-id",
++        "user-id",
++        is_deleted=False,
++        is_archived=False,
++    )
++    mock_prisma.return_value.create.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_add_graph_to_library_restores_deleted_agent() -> None:
++    graph_model = MagicMock(id="graph-id", version=2)
++    deleted_agent = MagicMock(id="library-agent-id", isDeleted=True, isArchived=False)
++    restored_agent = MagicMock(name="LibraryAgentModel")
++
++    with (
++        patch(
++            "backend.api.features.library._add_to_library.get_library_agent_by_graph_id",
++            new=AsyncMock(return_value=None),
++        ),
++        patch(
++            "backend.api.features.library._add_to_library.prisma.models.LibraryAgent.prisma"
++        ) as mock_prisma,
++        patch(
++            "backend.api.features.library._add_to_library.update_library_agent",
++            new=AsyncMock(return_value=restored_agent),
++        ) as mock_update,
++    ):
++        mock_prisma.return_value.find_unique = AsyncMock(return_value=deleted_agent)
++
++        result = await add_graph_to_library("slv-id", graph_model, "user-id")
++
++    assert result is restored_agent
++    mock_update.assert_awaited_once_with(
++        "library-agent-id",
++        "user-id",
++        is_deleted=False,
++        is_archived=False,
++    )
++    mock_prisma.return_value.create.assert_not_called()
+diff --git a/autogpt_platform/backend/backend/api/features/library/db.py b/autogpt_platform/backend/backend/api/features/library/db.py
+index bd9fce59b..697a6bdf9 100644
+--- a/autogpt_platform/backend/backend/api/features/library/db.py
++++ b/autogpt_platform/backend/backend/api/features/library/db.py
+@@ -336,12 +336,15 @@ async def get_library_agent_by_graph_id(
+     user_id: str,
+     graph_id: str,
+     graph_version: Optional[int] = None,
++    include_archived: bool = False,
+ ) -> library_model.LibraryAgent | None:
+     filter: prisma.types.LibraryAgentWhereInput = {
+         "agentGraphId": graph_id,
+         "userId": user_id,
+         "isDeleted": False,
+     }
++    if not include_archived:
++        filter["isArchived"] = False
+     if graph_version is not None:
+         filter["agentGraphVersion"] = graph_version
+ 
+@@ -582,7 +585,9 @@ async def update_graph_in_library(
+ 
+     created_graph = await graph_db.create_graph(graph_model, user_id)
+ 
+-    library_agent = await get_library_agent_by_graph_id(user_id, created_graph.id)
++    library_agent = await get_library_agent_by_graph_id(
++        user_id, created_graph.id, include_archived=True
++    )
+     if not library_agent:
+         raise NotFoundError(f"Library agent not found for graph {created_graph.id}")
+ 
+@@ -818,92 +823,38 @@ async def delete_library_agent_by_graph_id(graph_id: str, user_id: str) -> None:
+ async def add_store_agent_to_library(
+     store_listing_version_id: str, user_id: str
+ ) -> library_model.LibraryAgent:
+-    """
+-    Adds an agent from a store listing version to the user's library if they don't already have it.
++    """Adds a marketplace agent to the user’s library.
+ 
+-    Args:
+-        store_listing_version_id: The ID of the store listing version containing the agent.
+-        user_id: The user’s library to which the agent is being added.
+-
+-    Returns:
+-        The newly created LibraryAgent if successfully added, the existing corresponding one if any.
+-
+-    Raises:
+-        NotFoundError: If the store listing or associated agent is not found.
+-        DatabaseError: If there's an issue creating the LibraryAgent record.
++    See also: `add_store_agent_to_library_as_admin()` which uses
++    `get_graph_as_admin` to bypass marketplace status checks for admin review.
+     """
++    from ._add_to_library import add_graph_to_library, resolve_graph_for_library
++
+     logger.debug(
+         f"Adding agent from store listing version #{store_listing_version_id} "
+         f"to library for user #{user_id}"
+     )
+-
+-    store_listing_version = (
+-        await prisma.models.StoreListingVersion.prisma().find_unique(
+-            where={"id": store_listing_version_id}, include={"AgentGraph": True}
+-        )
++    graph_model = await resolve_graph_for_library(
++        store_listing_version_id, user_id, admin=False
+     )
+-    if not store_listing_version or not store_listing_version.AgentGraph:
+-        logger.warning(f"Store listing version not found: {store_listing_version_id}")
+-        raise NotFoundError(
+-            f"Store listing version {store_listing_version_id} not found or invalid"
+-        )
++    return await add_graph_to_library(store_listing_version_id, graph_model, user_id)
+ 
+-    graph = store_listing_version.AgentGraph
+-
+-    # Convert to GraphModel to check for HITL blocks
+-    graph_model = await graph_db.get_graph(
+-        graph_id=graph.id,
+-        version=graph.version,
+-        user_id=user_id,
+-        include_subgraphs=False,
+-    )
+-    if not graph_model:
+-        raise NotFoundError(
+-            f"Graph #{graph.id} v{graph.version} not found or accessible"
+-        )
+ 
+-    # Check if user already has this agent (non-deleted)
+-    if existing := await get_library_agent_by_graph_id(
+-        user_id, graph.id, graph.version
+-    ):
+-        return existing
++async def add_store_agent_to_library_as_admin(
++    store_listing_version_id: str, user_id: str
++) -> library_model.LibraryAgent:
++    """Admin variant that uses `get_graph_as_admin` to bypass marketplace
++    APPROVED-only checks, allowing admins to add pending agents for review."""
++    from ._add_to_library import add_graph_to_library, resolve_graph_for_library
+ 
+-    # Check for soft-deleted version and restore it
+-    deleted_agent = await prisma.models.LibraryAgent.prisma().find_unique(
+-        where={
+-            "userId_agentGraphId_agentGraphVersion": {
+-                "userId": user_id,
+-                "agentGraphId": graph.id,
+-                "agentGraphVersion": graph.version,
+-            }
+-        },
++    logger.warning(
++        f"ADMIN adding agent from store listing version "
++        f"#{store_listing_version_id} to library for user #{user_id}"
+     )
+-    if deleted_agent and deleted_agent.isDeleted:
+-        return await update_library_agent(deleted_agent.id, user_id, is_deleted=False)
+-
+-    # Create LibraryAgent entry
+-    added_agent = await prisma.models.LibraryAgent.prisma().create(
+-        data={
+-            "User": {"connect": {"id": user_id}},
+-            "AgentGraph": {
+-                "connect": {
+-                    "graphVersionId": {"id": graph.id, "version": graph.version}
+-                }
+-            },
+-            "isCreatedByUser": False,
+-            "useGraphIsActiveVersion": False,
+-            "settings": SafeJson(GraphSettings.from_graph(graph_model).model_dump()),
+-        },
+-        include=library_agent_include(
+-            user_id, include_nodes=False, include_executions=False
+-        ),
+-    )
+-    logger.debug(
+-        f"Added graph #{graph.id} v{graph.version}"
+-        f"for store listing version #{store_listing_version.id} "
+-        f"to library for user #{user_id}"
++    graph_model = await resolve_graph_for_library(
++        store_listing_version_id, user_id, admin=True
+     )
+-    return library_model.LibraryAgent.from_db(added_agent)
++    return await add_graph_to_library(store_listing_version_id, graph_model, user_id)
+ 
+ 
+ ##############################################
+diff --git a/autogpt_platform/backend/backend/api/features/library/db_test.py b/autogpt_platform/backend/backend/api/features/library/db_test.py
+index 1c5106e15..02886b227 100644
+--- a/autogpt_platform/backend/backend/api/features/library/db_test.py
++++ b/autogpt_platform/backend/backend/api/features/library/db_test.py
+@@ -150,8 +150,13 @@ async def test_add_agent_to_library(mocker):
+     )
+ 
+     # Mock graph_db.get_graph function that's called to check for HITL blocks
+-    mock_graph_db = mocker.patch("backend.api.features.library.db.graph_db")
++    # (lives in _add_to_library.py after refactor, not db.py)
++    mock_graph_db = mocker.patch(
++        "backend.api.features.library._add_to_library.graph_db"
++    )
+     mock_graph_model = mocker.Mock()
++    mock_graph_model.id = "agent1"
++    mock_graph_model.version = 1
+     mock_graph_model.nodes = (
+         []
+     )  # Empty list so _has_human_in_the_loop_blocks returns False
+@@ -224,3 +229,94 @@ async def test_add_agent_to_library_not_found(mocker):
+     mock_store_listing_version.return_value.find_unique.assert_called_once_with(
+         where={"id": "version123"}, include={"AgentGraph": True}
+     )
++
++
++@pytest.mark.asyncio
++async def test_get_library_agent_by_graph_id_excludes_archived(mocker):
++    mock_library_agent = mocker.patch("prisma.models.LibraryAgent.prisma")
++    mock_library_agent.return_value.find_first = mocker.AsyncMock(return_value=None)
++
++    result = await db.get_library_agent_by_graph_id("test-user", "agent1", 7)
++
++    assert result is None
++    mock_library_agent.return_value.find_first.assert_called_once()
++    where = mock_library_agent.return_value.find_first.call_args.kwargs["where"]
++    assert where == {
++        "agentGraphId": "agent1",
++        "userId": "test-user",
++        "isDeleted": False,
++        "isArchived": False,
++        "agentGraphVersion": 7,
++    }
++
++
++@pytest.mark.asyncio
++async def test_get_library_agent_by_graph_id_can_include_archived(mocker):
++    mock_library_agent = mocker.patch("prisma.models.LibraryAgent.prisma")
++    mock_library_agent.return_value.find_first = mocker.AsyncMock(return_value=None)
++
++    result = await db.get_library_agent_by_graph_id(
++        "test-user",
++        "agent1",
++        7,
++        include_archived=True,
++    )
++
++    assert result is None
++    mock_library_agent.return_value.find_first.assert_called_once()
++    where = mock_library_agent.return_value.find_first.call_args.kwargs["where"]
++    assert where == {
++        "agentGraphId": "agent1",
++        "userId": "test-user",
++        "isDeleted": False,
++        "agentGraphVersion": 7,
++    }
++
++
++@pytest.mark.asyncio
++async def test_update_graph_in_library_allows_archived_library_agent(mocker):
++    graph = mocker.Mock(id="graph-id")
++    existing_version = mocker.Mock(version=1, is_active=True)
++    graph_model = mocker.Mock()
++    created_graph = mocker.Mock(id="graph-id", version=2, is_active=False)
++    current_library_agent = mocker.Mock()
++    updated_library_agent = mocker.Mock()
++
++    mocker.patch(
++        "backend.api.features.library.db.graph_db.get_graph_all_versions",
++        new=mocker.AsyncMock(return_value=[existing_version]),
++    )
++    mocker.patch(
++        "backend.api.features.library.db.graph_db.make_graph_model",
++        return_value=graph_model,
++    )
++    mocker.patch(
++        "backend.api.features.library.db.graph_db.create_graph",
++        new=mocker.AsyncMock(return_value=created_graph),
++    )
++    mock_get_library_agent = mocker.patch(
++        "backend.api.features.library.db.get_library_agent_by_graph_id",
++        new=mocker.AsyncMock(return_value=current_library_agent),
++    )
++    mock_update_library_agent = mocker.patch(
++        "backend.api.features.library.db.update_library_agent_version_and_settings",
++        new=mocker.AsyncMock(return_value=updated_library_agent),
++    )
++
++    result_graph, result_library_agent = await db.update_graph_in_library(
++        graph,
++        "test-user",
++    )
++
++    assert result_graph is created_graph
++    assert result_library_agent is updated_library_agent
++    assert graph.version == 2
++    graph_model.reassign_ids.assert_called_once_with(
++        user_id="test-user", reassign_graph_id=False
++    )
++    mock_get_library_agent.assert_awaited_once_with(
++        "test-user",
++        "graph-id",
++        include_archived=True,
++    )
++    mock_update_library_agent.assert_awaited_once_with("test-user", created_graph)
+diff --git a/autogpt_platform/backend/backend/api/features/store/db.py b/autogpt_platform/backend/backend/api/features/store/db.py
+index 4ae7f561a..662e6c191 100644
+--- a/autogpt_platform/backend/backend/api/features/store/db.py
++++ b/autogpt_platform/backend/backend/api/features/store/db.py
+@@ -391,6 +391,11 @@ async def get_available_graph(
+ async def get_store_agent_by_version_id(
+     store_listing_version_id: str,
+ ) -> store_model.StoreAgentDetails:
++    """Get agent details from the StoreAgent view (APPROVED agents only).
++
++    See also: `get_store_agent_details_as_admin()` which bypasses the
++    APPROVED-only StoreAgent view for admin preview of pending submissions.
++    """
+     logger.debug(f"Getting store agent details for {store_listing_version_id}")
+ 
+     try:
+@@ -411,6 +416,57 @@ async def get_store_agent_by_version_id(
+         raise DatabaseError("Failed to fetch agent details") from e
+ 
+ 
++async def get_store_agent_details_as_admin(
++    store_listing_version_id: str,
++) -> store_model.StoreAgentDetails:
++    """Get agent details for admin preview, bypassing the APPROVED-only
++    StoreAgent view. Queries StoreListingVersion directly so pending
++    submissions are visible."""
++    slv = await prisma.models.StoreListingVersion.prisma().find_unique(
++        where={"id": store_listing_version_id},
++        include={
++            "StoreListing": {"include": {"CreatorProfile": True}},
++        },
++    )
++    if not slv or not slv.StoreListing:
++        raise NotFoundError(
++            f"Store listing version {store_listing_version_id} not found"
++        )
++
++    listing = slv.StoreListing
++    # CreatorProfile is a required FK relation — should always exist.
++    # If it's None, the DB is in a bad state.
++    profile = listing.CreatorProfile
++    if not profile:
++        raise DatabaseError(
++            f"StoreListing {listing.id} has no CreatorProfile — FK violated"
++        )
++
++    return store_model.StoreAgentDetails(
++        store_listing_version_id=slv.id,
++        slug=listing.slug,
++        agent_name=slv.name,
++        agent_video=slv.videoUrl or "",
++        agent_output_demo=slv.agentOutputDemoUrl or "",
++        agent_image=slv.imageUrls,
++        creator=profile.username,
++        creator_avatar=profile.avatarUrl or "",
++        sub_heading=slv.subHeading,
++        description=slv.description,
++        instructions=slv.instructions,
++        categories=slv.categories,
++        runs=0,
++        rating=0.0,
++        versions=[str(slv.version)],
++        graph_id=slv.agentGraphId,
++        graph_versions=[str(slv.agentGraphVersion)],
++        last_updated=slv.updatedAt,
++        recommended_schedule_cron=slv.recommendedScheduleCron,
++        active_version_id=listing.activeVersionId or slv.id,
++        has_approved_version=listing.hasApprovedVersion,
++    )
++
++
+ class StoreCreatorsSortOptions(Enum):
+     # NOTE: values correspond 1:1 to columns of the Creator view
+     AGENT_RATING = "agent_rating"
+diff --git a/autogpt_platform/backend/backend/data/graph.py b/autogpt_platform/backend/backend/data/graph.py
+index 4c685b7d1..067ca4e83 100644
+--- a/autogpt_platform/backend/backend/data/graph.py
++++ b/autogpt_platform/backend/backend/data/graph.py
+@@ -1096,6 +1096,9 @@ async def get_graph(
+     Retrieves a graph from the DB.
+     Defaults to the version with `is_active` if `version` is not passed.
+ 
++    See also: `get_graph_as_admin()` which bypasses ownership and marketplace
++    checks for admin-only routes.
++
+     Returns `None` if the record is not found.
+     """
+     graph = None
+@@ -1133,6 +1136,27 @@ async def get_graph(
+         ):
+             graph = store_listing.AgentGraph
+ 
++    # Fall back to library membership: if the user has the agent in their
++    # library (non-deleted, non-archived), grant access even if the agent is
++    # no longer published. "You added it, you keep it."
++    if graph is None and user_id is not None:
++        library_where: dict[str, object] = {
++            "userId": user_id,
++            "agentGraphId": graph_id,
++            "isDeleted": False,
++            "isArchived": False,
++        }
++        if version is not None:
++            library_where["agentGraphVersion"] = version
++
++        library_agent = await LibraryAgent.prisma().find_first(
++            where=library_where,
++            include={"AgentGraph": {"include": AGENT_GRAPH_INCLUDE}},
++            order={"agentGraphVersion": "desc"},
++        )
++        if library_agent and library_agent.AgentGraph:
++            graph = library_agent.AgentGraph
++
+     if graph is None:
+         return None
+ 
+@@ -1368,8 +1392,9 @@ async def validate_graph_execution_permissions(
+     ## Logic
+     A user can execute a graph if any of these is true:
+     1. They own the graph and some version of it is still listed in their library
+-    2. The graph is published in the marketplace and listed in their library
+-    3. The graph is published in the marketplace and is being executed as a sub-agent
++    2. The graph is in the user's library (non-deleted, non-archived)
++    3. The graph is published in the marketplace and listed in their library
++    4. The graph is published in the marketplace and is being executed as a sub-agent
+ 
+     Args:
+         graph_id: The ID of the graph to check
+@@ -1391,6 +1416,7 @@ async def validate_graph_execution_permissions(
+             where={
+                 "userId": user_id,
+                 "agentGraphId": graph_id,
++                "agentGraphVersion": graph_version,
+                 "isDeleted": False,
+                 "isArchived": False,
+             }
+@@ -1400,19 +1426,39 @@ async def validate_graph_execution_permissions(
+     # Step 1: Check if user owns this graph
+     user_owns_graph = graph and graph.userId == user_id
+ 
+-    # Step 2: Check if agent is in the library *and not deleted*
++    # Step 2: Check if the exact graph version is in the library.
+     user_has_in_library = library_agent is not None
++    owner_has_live_library_entry = user_has_in_library
++    if user_owns_graph and not user_has_in_library:
++        # Owners are allowed to execute a new version as long as some live
++        # library entry still exists for the graph. Non-owners stay
++        # version-specific.
++        owner_has_live_library_entry = (
++            await LibraryAgent.prisma().find_first(
++                where={
++                    "userId": user_id,
++                    "agentGraphId": graph_id,
++                    "isDeleted": False,
++                    "isArchived": False,
++                }
++            )
++            is not None
++        )
+ 
+     # Step 3: Apply permission logic
++    # Access is granted if the user owns it, it's in the marketplace, OR
++    # it's in the user's library ("you added it, you keep it").
+     if not (
+         user_owns_graph
++        or user_has_in_library
+         or await is_graph_published_in_marketplace(graph_id, graph_version)
+     ):
+         raise GraphNotAccessibleError(
+             f"You do not have access to graph #{graph_id} v{graph_version}: "
+-            "it is not owned by you and not available in the Marketplace"
++            "it is not owned by you, not in your library, "
++            "and not available in the Marketplace"
+         )
+-    elif not (user_has_in_library or is_sub_graph):
++    elif not (user_has_in_library or owner_has_live_library_entry or is_sub_graph):
+         raise GraphNotInLibraryError(f"Graph #{graph_id} is not in your library")
+ 
+     # Step 6: Check execution-specific permissions (raises generic NotAuthorizedError)
+diff --git a/autogpt_platform/backend/backend/data/graph_test.py b/autogpt_platform/backend/backend/data/graph_test.py
+index 0034f9bdf..08d43c4a5 100644
+--- a/autogpt_platform/backend/backend/data/graph_test.py
++++ b/autogpt_platform/backend/backend/data/graph_test.py
+@@ -13,10 +13,17 @@ from backend.api.model import CreateGraph
+ from backend.blocks._base import BlockSchema, BlockSchemaInput
+ from backend.blocks.basic import StoreValueBlock
+ from backend.blocks.io import AgentInputBlock, AgentOutputBlock
+-from backend.data.graph import Graph, Link, Node, get_graph
++from backend.data.graph import (
++    Graph,
++    Link,
++    Node,
++    get_graph,
++    validate_graph_execution_permissions,
++)
+ from backend.data.model import SchemaField
+ from backend.data.user import DEFAULT_USER_ID
+ from backend.usecases.sample import create_test_user
++from backend.util.exceptions import GraphNotAccessibleError, GraphNotInLibraryError
+ from backend.util.test import SpinTestServer
+ 
+ 
+@@ -597,9 +604,32 @@ def test_mcp_credential_combine_no_discriminator_values():
+     )
+ 
+ 
+-# --------------- get_graph access-control regression tests --------------- #
+-# These protect the behavior introduced in PR #11323 (Reinier, 2025-11-05):
+-# non-owners can access APPROVED marketplace agents but NOT pending ones.
++# --------------- get_graph access-control truth table --------------- #
++#
++# Full matrix of access scenarios for get_graph() and get_graph_as_admin().
++# Access priority: ownership > marketplace APPROVED > library membership.
++# Library is version-specific. get_graph_as_admin bypasses everything.
++#
++# | User     | Owns? | Marketplace | Library          | Version | Result  | Test
++# |----------|-------|-------------|------------------|---------|---------|-----
++# | regular  | yes   | any         | any              | v1      | ACCESS  | test_get_graph_library_not_queried_when_owned
++# | regular  | no    | APPROVED    | any              | v1      | ACCESS  | test_get_graph_non_owner_approved_marketplace_agent
++# | regular  | no    | not listed  | active, same ver | v1      | ACCESS  | test_get_graph_library_member_can_access_unpublished
++# | regular  | no    | not listed  | active, diff ver | v2      | DENIED  | test_get_graph_library_wrong_version_denied
++# | regular  | no    | not listed  | deleted          | v1      | DENIED  | test_get_graph_deleted_library_agent_denied
++# | regular  | no    | not listed  | archived         | v1      | DENIED  | test_get_graph_archived_library_agent_denied
++# | regular  | no    | not listed  | not present      | v1      | DENIED  | test_get_graph_non_owner_pending_not_in_library_denied
++# | regular  | no    | PENDING     | active v1        | v2      | DENIED  | test_library_v1_does_not_grant_access_to_pending_v2
++# | regular  | no    | not listed  | null AgentGraph  | v1      | DENIED  | test_get_graph_library_with_null_agent_graph_denied
++# | anon     | no    | not listed  | -                | v1      | DENIED  | test_get_graph_library_fallback_not_used_for_anonymous
++# | anon     | no    | APPROVED    | -                | v1      | ACCESS  | test_get_graph_anonymous_approved_marketplace_access
++# | admin*   | no    | PENDING     | -                | v2      | ACCESS  | test_admin_can_access_pending_v2_via_get_graph_as_admin
++#
++# Efficiency (no unnecessary queries):
++# | regular  | yes   | -           | -                | v1      | no mkt/lib | test_get_graph_library_not_queried_when_owned
++# | regular  | no    | APPROVED    | -                | v1      | no lib     | test_get_graph_library_not_queried_when_marketplace_approved
++#
++# * = via get_graph_as_admin (admin-only routes)
+ 
+ 
+ def _make_mock_db_graph(user_id: str = "owner-user-id") -> MagicMock:
+@@ -649,10 +679,9 @@ async def test_get_graph_non_owner_approved_marketplace_agent() -> None:
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_get_graph_non_owner_pending_marketplace_agent_denied() -> None:
+-    """A non-owner must NOT be able to access a graph that only has a PENDING
+-    (not APPROVED) marketplace listing.  The marketplace fallback filters on
+-    submissionStatus=APPROVED, so pending agents should be invisible."""
++async def test_get_graph_non_owner_pending_not_in_library_denied() -> None:
++    """A non-owner with no library membership and no APPROVED marketplace
++    listing must be denied access."""
+     requester_id = "different-user-id"
+     graph_id = "graph-id"
+ 
+@@ -661,11 +690,11 @@ async def test_get_graph_non_owner_pending_marketplace_agent_denied() -> None:
+         patch(
+             "backend.data.graph.StoreListingVersion.prisma",
+         ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
+     ):
+-        # First lookup (owned graph) returns None
+         mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
+-        # Marketplace fallback finds nothing (not APPROVED)
+         mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
+ 
+         result = await get_graph(
+             graph_id=graph_id,
+@@ -673,4 +702,761 @@ async def test_get_graph_non_owner_pending_marketplace_agent_denied() -> None:
+             user_id=requester_id,
+         )
+ 
+-    assert result is None, "Non-owner must not access a pending marketplace agent"
++    assert (
++        result is None
++    ), "User without ownership, marketplace, or library access must be denied"
++
++
++# --------------- Library membership grants graph access --------------- #
++# "You added it, you keep it" — product decision from SECRT-2167.
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_member_can_access_unpublished() -> None:
++    """A user who has the agent in their library should be able to access it
++    even if it's no longer published in the marketplace."""
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++    mock_graph = _make_mock_db_graph("original-creator-id")
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    mock_library_agent = MagicMock()
++    mock_library_agent.AgentGraph = mock_graph
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        # Not owned
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # Not in marketplace (unpublished)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # But IS in user's library
++        mock_lib_prisma.return_value.find_first = AsyncMock(
++            return_value=mock_library_agent
++        )
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=requester_id,
++        )
++
++    assert result is mock_graph_model, "Library member should access unpublished agent"
++
++    # Verify library query filters on non-deleted, non-archived
++    lib_call = mock_lib_prisma.return_value.find_first
++    lib_call.assert_awaited_once()
++    assert lib_call.await_args is not None
++    lib_where = lib_call.await_args.kwargs["where"]
++    assert lib_where["userId"] == requester_id
++    assert lib_where["agentGraphId"] == graph_id
++    assert lib_where["isDeleted"] is False
++    assert lib_where["isArchived"] is False
++
++
++@pytest.mark.asyncio
++async def test_get_graph_deleted_library_agent_denied() -> None:
++    """If the user soft-deleted the agent from their library, they should
++    NOT get access via the library fallback."""
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # Library query returns None because isDeleted=False filter excludes it
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=requester_id,
++        )
++
++    assert result is None, "Deleted library agent should not grant graph access"
++
++
++@pytest.mark.asyncio
++async def test_get_graph_anonymous_approved_marketplace_access() -> None:
++    """Anonymous users (user_id=None) should still access APPROVED marketplace
++    agents — the marketplace fallback doesn't require authentication."""
++    graph_id = "graph-id"
++    mock_graph = _make_mock_db_graph("creator-id")
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    mock_listing = MagicMock()
++    mock_listing.AgentGraph = mock_graph
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=mock_listing)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=None,
++        )
++
++    assert (
++        result is mock_graph_model
++    ), "Anonymous user should access APPROVED marketplace agent"
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_fallback_not_used_for_anonymous() -> None:
++    """Anonymous requests (user_id=None) must not trigger the library
++    fallback — there's no user to check library membership for."""
++    graph_id = "graph-id"
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=None,
++        )
++
++    assert result is None
++    # Library should never be queried for anonymous users
++    mock_lib_prisma.return_value.find_first.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_not_queried_when_owned() -> None:
++    """If the user owns the graph, the library fallback should NOT be
++    triggered — ownership is sufficient."""
++    owner_id = "owner-user-id"
++    graph_id = "graph-id"
++    mock_graph = _make_mock_db_graph(owner_id)
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        # User owns the graph — first lookup succeeds
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=mock_graph)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=owner_id,
++        )
++
++    assert result is mock_graph_model
++    # Neither marketplace nor library should be queried
++    mock_slv_prisma.return_value.find_first.assert_not_called()
++    mock_lib_prisma.return_value.find_first.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_not_queried_when_marketplace_approved() -> None:
++    """If the graph is APPROVED in the marketplace, the library fallback
++    should NOT be triggered — marketplace access is sufficient."""
++    requester_id = "different-user-id"
++    graph_id = "graph-id"
++    mock_graph = _make_mock_db_graph("original-creator-id")
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    mock_listing = MagicMock()
++    mock_listing.AgentGraph = mock_graph
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=mock_listing)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=requester_id,
++        )
++
++    assert result is mock_graph_model
++    # Library should not be queried — marketplace was sufficient
++    mock_lib_prisma.return_value.find_first.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_get_graph_archived_library_agent_denied() -> None:
++    """If the user archived the agent in their library, they should
++    NOT get access via the library fallback."""
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # Library query returns None because isArchived=False filter excludes it
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=requester_id,
++        )
++
++    assert result is None, "Archived library agent should not grant graph access"
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_with_null_agent_graph_denied() -> None:
++    """If LibraryAgent exists but its AgentGraph relation is None
++    (data integrity issue), access must be denied, not crash."""
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++
++    mock_library_agent = MagicMock()
++    mock_library_agent.AgentGraph = None  # broken relation
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_lib_prisma.return_value.find_first = AsyncMock(
++            return_value=mock_library_agent
++        )
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=1,
++            user_id=requester_id,
++        )
++
++    assert (
++        result is None
++    ), "Library agent with missing graph relation should not grant access"
++
++
++@pytest.mark.asyncio
++async def test_get_graph_library_wrong_version_denied() -> None:
++    """Having version 1 in your library must NOT grant access to version 2."""
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # Library has version 1 but we're requesting version 2 —
++        # the where clause includes agentGraphVersion so this returns None
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=2,
++            user_id=requester_id,
++        )
++
++    assert (
++        result is None
++    ), "Library agent for version 1 must not grant access to version 2"
++    # Verify version was included in the library query
++    lib_call = mock_lib_prisma.return_value.find_first
++    lib_call.assert_called_once()
++    lib_where = lib_call.call_args.kwargs["where"]
++    assert lib_where["agentGraphVersion"] == 2
++
++
++@pytest.mark.asyncio
++async def test_library_v1_does_not_grant_access_to_pending_v2() -> None:
++    """A regular user has v1 in their library. v2 is pending (not approved).
++    They must NOT get access to v2 — library membership is version-specific."""
++    requester_id = "regular-user-id"
++    graph_id = "graph-id"
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch(
++            "backend.data.graph.StoreListingVersion.prisma",
++        ) as mock_slv_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++    ):
++        # Not owned
++        mock_ag_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # v2 is not APPROVED in marketplace
++        mock_slv_prisma.return_value.find_first = AsyncMock(return_value=None)
++        # Library has v1 but not v2 — version filter excludes it
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        result = await get_graph(
++            graph_id=graph_id,
++            version=2,
++            user_id=requester_id,
++        )
++
++    assert result is None, "Regular user with v1 in library must not access pending v2"
++
++
++@pytest.mark.asyncio
++async def test_admin_can_access_pending_v2_via_get_graph_as_admin() -> None:
++    """An admin can access v2 (pending) via get_graph_as_admin even though
++    only v1 is approved. get_graph_as_admin bypasses all access checks."""
++    from backend.data.graph import get_graph_as_admin
++
++    admin_id = "admin-user-id"
++    mock_graph = _make_mock_db_graph("creator-user-id")
++    mock_graph.version = 2
++    mock_graph_model = MagicMock(name="GraphModel")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_prisma,
++        patch(
++            "backend.data.graph.GraphModel.from_db",
++            return_value=mock_graph_model,
++        ),
++    ):
++        mock_prisma.return_value.find_first = AsyncMock(return_value=mock_graph)
++
++        result = await get_graph_as_admin(
++            graph_id="graph-id",
++            version=2,
++            user_id=admin_id,
++            for_export=False,
++        )
++
++    assert (
++        result is mock_graph_model
++    ), "Admin must access pending v2 via get_graph_as_admin"
++
++
++# --------------- execution permission truth table --------------- #
++#
++# validate_graph_execution_permissions() has two gates:
++# 1. Accessible graph: owner OR exact-version library entry OR marketplace-published
++# 2. Runnable graph: exact-version library entry OR owner fallback to any live
++#    library entry for the graph OR sub-graph exception
++#
++# Desired owner behavior differs from non-owners:
++# owners should be allowed to run a new version when some non-archived/non-deleted
++# version of that graph is still in their library. Non-owners stay
++# version-specific.
++#
++# | User     | Owns? | Marketplace | Library state                | is_sub_graph | Result   | Test
++# |----------|-------|-------------|------------------------------|--------------|----------|-----
++# | regular  | no    | no          | exact version present        | false        | ALLOW    | test_validate_graph_execution_permissions_library_member_same_version_allowed
++# | owner    | yes   | no          | exact version present        | false        | ALLOW    | test_validate_graph_execution_permissions_owner_same_version_in_library_allowed
++# | owner    | yes   | no          | previous version present     | false        | ALLOW    | test_validate_graph_execution_permissions_owner_previous_library_version_allowed
++# | owner    | yes   | no          | none present                 | false        | DENY lib | test_validate_graph_execution_permissions_owner_without_library_denied
++# | owner    | yes   | no          | only archived/deleted older  | false        | DENY lib | test_validate_graph_execution_permissions_owner_previous_archived_library_version_denied
++# | regular  | no    | yes         | none present                 | false        | DENY lib | test_validate_graph_execution_permissions_marketplace_graph_not_in_library_denied
++# | admin    | no    | no          | none present                 | false        | DENY acc | test_validate_graph_execution_permissions_admin_without_library_or_marketplace_denied
++# | regular  | no    | yes         | none present                 | true         | ALLOW    | test_validate_graph_execution_permissions_marketplace_sub_graph_without_library_allowed
++# | regular  | no    | no          | none present                 | true         | DENY acc | test_validate_graph_execution_permissions_unpublished_sub_graph_without_library_denied
++# | regular  | no    | no          | wrong version only           | false        | DENY acc | test_validate_graph_execution_permissions_library_wrong_version_denied
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_library_member_same_version_allowed() -> (
++    None
++):
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=MagicMock())
++
++        await validate_graph_execution_permissions(
++            user_id=requester_id,
++            graph_id=graph_id,
++            graph_version=graph_version,
++        )
++
++    mock_is_published.assert_not_awaited()
++    lib_where = mock_lib_prisma.return_value.find_first.call_args.kwargs["where"]
++    assert lib_where["agentGraphVersion"] == graph_version
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_owner_same_version_in_library_allowed() -> (
++    None
++):
++    requester_id = "owner-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId=requester_id)
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=MagicMock())
++
++        await validate_graph_execution_permissions(
++            user_id=requester_id,
++            graph_id=graph_id,
++            graph_version=graph_version,
++        )
++
++    mock_is_published.assert_not_awaited()
++    lib_where = mock_lib_prisma.return_value.find_first.call_args.kwargs["where"]
++    assert lib_where["agentGraphVersion"] == graph_version
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_owner_previous_library_version_allowed() -> (
++    None
++):
++    requester_id = "owner-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId=requester_id)
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(
++            side_effect=[None, MagicMock(name="PriorVersionLibraryAgent")]
++        )
++
++        await validate_graph_execution_permissions(
++            user_id=requester_id,
++            graph_id=graph_id,
++            graph_version=graph_version,
++        )
++
++    mock_is_published.assert_not_awaited()
++    assert mock_lib_prisma.return_value.find_first.await_count == 2
++    first_where = mock_lib_prisma.return_value.find_first.await_args_list[0].kwargs[
++        "where"
++    ]
++    second_where = mock_lib_prisma.return_value.find_first.await_args_list[1].kwargs[
++        "where"
++    ]
++    assert first_where["agentGraphVersion"] == graph_version
++    assert "agentGraphVersion" not in second_where
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_owner_without_library_denied() -> (
++    None
++):
++    requester_id = "owner-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId=requester_id)
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        with pytest.raises(GraphNotInLibraryError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++            )
++
++    mock_is_published.assert_not_awaited()
++    assert mock_lib_prisma.return_value.find_first.await_count == 2
++    first_where = mock_lib_prisma.return_value.find_first.await_args_list[0].kwargs[
++        "where"
++    ]
++    second_where = mock_lib_prisma.return_value.find_first.await_args_list[1].kwargs[
++        "where"
++    ]
++    assert first_where["agentGraphVersion"] == graph_version
++    assert second_where == {
++        "userId": requester_id,
++        "agentGraphId": graph_id,
++        "isDeleted": False,
++        "isArchived": False,
++    }
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_owner_previous_archived_library_version_denied() -> (
++    None
++):
++    requester_id = "owner-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId=requester_id)
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(side_effect=[None, None])
++
++        with pytest.raises(GraphNotInLibraryError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++            )
++
++    mock_is_published.assert_not_awaited()
++    assert mock_lib_prisma.return_value.find_first.await_count == 2
++    first_where = mock_lib_prisma.return_value.find_first.await_args_list[0].kwargs[
++        "where"
++    ]
++    second_where = mock_lib_prisma.return_value.find_first.await_args_list[1].kwargs[
++        "where"
++    ]
++    assert first_where["agentGraphVersion"] == graph_version
++    assert second_where == {
++        "userId": requester_id,
++        "agentGraphId": graph_id,
++        "isDeleted": False,
++        "isArchived": False,
++    }
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_marketplace_graph_not_in_library_denied() -> (
++    None
++):
++    requester_id = "marketplace-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=True,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        with pytest.raises(GraphNotInLibraryError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++            )
++
++    mock_is_published.assert_awaited_once_with(graph_id, graph_version)
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_admin_without_library_or_marketplace_denied() -> (
++    None
++):
++    requester_id = "admin-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        with pytest.raises(GraphNotAccessibleError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++            )
++
++    mock_is_published.assert_awaited_once_with(graph_id, graph_version)
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_unpublished_sub_graph_without_library_denied() -> (
++    None
++):
++    requester_id = "marketplace-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        with pytest.raises(GraphNotAccessibleError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++                is_sub_graph=True,
++            )
++
++    mock_is_published.assert_awaited_once_with(graph_id, graph_version)
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_marketplace_sub_graph_without_library_allowed() -> (
++    None
++):
++    requester_id = "marketplace-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=True,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        await validate_graph_execution_permissions(
++            user_id=requester_id,
++            graph_id=graph_id,
++            graph_version=graph_version,
++            is_sub_graph=True,
++        )
++
++    mock_is_published.assert_awaited_once_with(graph_id, graph_version)
++
++
++@pytest.mark.asyncio
++async def test_validate_graph_execution_permissions_library_wrong_version_denied() -> (
++    None
++):
++    requester_id = "library-user-id"
++    graph_id = "graph-id"
++    graph_version = 2
++    mock_graph = MagicMock(userId="creator-user-id")
++
++    with (
++        patch("backend.data.graph.AgentGraph.prisma") as mock_ag_prisma,
++        patch("backend.data.graph.LibraryAgent.prisma") as mock_lib_prisma,
++        patch(
++            "backend.data.graph.is_graph_published_in_marketplace",
++            new_callable=AsyncMock,
++            return_value=False,
++        ) as mock_is_published,
++    ):
++        mock_ag_prisma.return_value.find_unique = AsyncMock(return_value=mock_graph)
++        mock_lib_prisma.return_value.find_first = AsyncMock(return_value=None)
++
++        with pytest.raises(GraphNotAccessibleError):
++            await validate_graph_execution_permissions(
++                user_id=requester_id,
++                graph_id=graph_id,
++                graph_version=graph_version,
++            )
++
++    mock_is_published.assert_awaited_once_with(graph_id, graph_version)
++    lib_where = mock_lib_prisma.return_value.find_first.call_args.kwargs["where"]
++    assert lib_where["agentGraphVersion"] == graph_version
+diff --git a/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/actions.ts b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/actions.ts
+index 948cdd4bb..89b7a27b6 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/actions.ts
++++ b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/actions.ts
+@@ -5,6 +5,8 @@ import {
+   getV2GetAdminListingsHistory,
+   postV2ReviewStoreSubmission,
+   getV2AdminDownloadAgentFile,
++  getV2AdminPreviewSubmissionListing,
++  postV2AdminAddPendingAgentToLibrary,
+ } from "@/app/api/__generated__/endpoints/admin/admin";
+ import { okData } from "@/app/api/helpers";
+ import { SubmissionStatus } from "@/app/api/__generated__/models/submissionStatus";
+@@ -58,3 +60,17 @@ export async function downloadAsAdmin(storeListingVersion: string) {
+   const response = await getV2AdminDownloadAgentFile(storeListingVersion);
+   return okData(response);
+ }
++
++export async function previewAsAdmin(storeListingVersionId: string) {
++  const response = await getV2AdminPreviewSubmissionListing(
++    storeListingVersionId,
++  );
++  return okData(response);
++}
++
++export async function addToLibraryAsAdmin(storeListingVersionId: string) {
++  const response = await postV2AdminAddPendingAgentToLibrary(
++    storeListingVersionId,
++  );
++  return okData(response);
++}
+diff --git a/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/components/ExpandleRow.tsx b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/components/ExpandleRow.tsx
+index 78a5eb550..4948df303 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/components/ExpandleRow.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/components/ExpandleRow.tsx
+@@ -10,11 +10,13 @@ import {
+   TableBody,
+ } from "@/components/__legacy__/ui/table";
+ import { Badge } from "@/components/__legacy__/ui/badge";
+-import { ChevronDown, ChevronRight } from "lucide-react";
++import { ChevronDown, ChevronRight, Eye } from "lucide-react";
++import Link from "next/link";
+ import { formatDistanceToNow } from "date-fns";
+ import type { StoreListingWithVersionsAdminView } from "@/app/api/__generated__/models/storeListingWithVersionsAdminView";
+ import type { StoreSubmissionAdminView } from "@/app/api/__generated__/models/storeSubmissionAdminView";
+ import { SubmissionStatus } from "@/app/api/__generated__/models/submissionStatus";
++import { Button } from "@/components/__legacy__/ui/button";
+ import { ApproveRejectButtons } from "./ApproveRejectButton";
+ import { DownloadAgentAdminButton } from "./DownloadAgentButton";
+ 
+@@ -76,9 +78,19 @@ export function ExpandableRow({
+         <TableCell className="text-right">
+           <div className="flex justify-end gap-2">
+             {latestVersion?.listing_version_id && (
+-              <DownloadAgentAdminButton
+-                storeListingVersionId={latestVersion.listing_version_id}
+-              />
++              <>
++                <Link
++                  href={`/admin/marketplace/preview/${latestVersion.listing_version_id}`}
++                >
++                  <Button size="sm" variant="outline">
++                    <Eye className="mr-2 h-4 w-4" />
++                    Preview
++                  </Button>
++                </Link>
++                <DownloadAgentAdminButton
++                  storeListingVersionId={latestVersion.listing_version_id}
++                />
++              </>
+             )}
+ 
+             {(latestVersion?.status === SubmissionStatus.PENDING ||
+@@ -108,7 +120,7 @@ export function ExpandableRow({
+                     <TableHead>Name</TableHead>
+                     <TableHead>Sub Heading</TableHead>
+                     <TableHead>Description</TableHead>
+-                    {/* <TableHead>Categories</TableHead> */}
++                    <TableHead>Categories</TableHead>
+                     <TableHead className="text-right">Actions</TableHead>
+                   </TableRow>
+                 </TableHeader>
+@@ -180,15 +192,29 @@ export function ExpandableRow({
+                         <TableCell>{version.name}</TableCell>
+                         <TableCell>{version.sub_heading}</TableCell>
+                         <TableCell>{version.description}</TableCell>
+-                        {/* <TableCell>{version.categories.join(", ")}</TableCell> */}
++                        <TableCell>
++                          {version.categories.length > 0
++                            ? version.categories.join(", ")
++                            : "None"}
++                        </TableCell>
+                         <TableCell className="text-right">
+                           <div className="flex justify-end gap-2">
+                             {version.listing_version_id && (
+-                              <DownloadAgentAdminButton
+-                                storeListingVersionId={
+-                                  version.listing_version_id
+-                                }
+-                              />
++                              <>
++                                <Link
++                                  href={`/admin/marketplace/preview/${version.listing_version_id}`}
++                                >
++                                  <Button size="sm" variant="outline">
++                                    <Eye className="mr-2 h-4 w-4" />
++                                    Preview
++                                  </Button>
++                                </Link>
++                                <DownloadAgentAdminButton
++                                  storeListingVersionId={
++                                    version.listing_version_id
++                                  }
++                                />
++                              </>
+                             )}
+                             {(version.status === SubmissionStatus.PENDING ||
+                               version.status === SubmissionStatus.APPROVED) && (
+diff --git a/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/preview/[id]/page.tsx b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/preview/[id]/page.tsx
+new file mode 100644
+index 000000000..9804c4d1d
+--- /dev/null
++++ b/autogpt_platform/frontend/src/app/(platform)/admin/marketplace/preview/[id]/page.tsx
+@@ -0,0 +1,172 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useParams, useRouter } from "next/navigation";
++import { ArrowLeft } from "@phosphor-icons/react";
++import { AgentInfo } from "@/app/(platform)/marketplace/components/AgentInfo/AgentInfo";
++import { AgentImages } from "@/app/(platform)/marketplace/components/AgentImages/AgentImage";
++import type { StoreAgentDetails } from "@/app/api/__generated__/models/storeAgentDetails";
++import { previewAsAdmin, addToLibraryAsAdmin } from "../../actions";
++import { useToast } from "@/components/molecules/Toast/use-toast";
++
++export default function AdminPreviewPage() {
++  const params = useParams<{ id: string }>();
++  const router = useRouter();
++  const { toast } = useToast();
++  const [data, setData] = useState<StoreAgentDetails | null>(null);
++  const [isLoading, setIsLoading] = useState(true);
++  const [error, setError] = useState<string | null>(null);
++  const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
++
++  useEffect(() => {
++    async function load() {
++      try {
++        const result = await previewAsAdmin(params.id);
++        setData(result as StoreAgentDetails);
++      } catch (e) {
++        setError(e instanceof Error ? e.message : "Failed to load preview");
++      } finally {
++        setIsLoading(false);
++      }
++    }
++    load();
++  }, [params.id]);
++
++  async function handleAddToLibrary() {
++    setIsAddingToLibrary(true);
++    try {
++      await addToLibraryAsAdmin(params.id);
++      toast({
++        title: "Added to Library",
++        description: "Agent has been added to your library for review.",
++        duration: 3000,
++      });
++    } catch (e) {
++      toast({
++        title: "Error",
++        description:
++          e instanceof Error ? e.message : "Failed to add agent to library.",
++        variant: "destructive",
++      });
++    } finally {
++      setIsAddingToLibrary(false);
++    }
++  }
++
++  if (isLoading) {
++    return (
++      <div className="flex min-h-screen items-center justify-center">
++        <p className="text-muted-foreground">Loading preview...</p>
++      </div>
++    );
++  }
++
++  if (error || !data) {
++    return (
++      <div className="flex min-h-screen flex-col items-center justify-center gap-4">
++        <p className="text-destructive">{error || "Preview not found"}</p>
++        <button
++          onClick={() => router.back()}
++          className="text-muted-foreground underline"
++        >
++          Go back
++        </button>
++      </div>
++    );
++  }
++
++  const allMedia = [
++    ...(data.agent_video ? [data.agent_video] : []),
++    ...(data.agent_output_demo ? [data.agent_output_demo] : []),
++    ...data.agent_image,
++  ];
++
++  return (
++    <div className="container mx-auto max-w-7xl px-4 py-6">
++      <div className="mb-6 flex items-center justify-between">
++        <button
++          onClick={() => router.back()}
++          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
++        >
++          <ArrowLeft size={16} />
++          Back to Admin Marketplace
++        </button>
++
++        <div className="flex items-center gap-3">
++          <span className="rounded-md bg-amber-500/20 px-3 py-1 text-sm font-medium text-amber-600">
++            Admin Preview
++            {!data.has_approved_version && " — Pending Approval"}
++          </span>
++          <button
++            onClick={handleAddToLibrary}
++            disabled={isAddingToLibrary}
++            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
++          >
++            {isAddingToLibrary ? "Adding..." : "Add to My Library"}
++          </button>
++        </div>
++      </div>
++
++      <div className="grid grid-cols-1 gap-8 lg:grid-cols-5">
++        <div className="lg:col-span-2">
++          <AgentInfo
++            user={null}
++            agentId={data.graph_id}
++            name={data.agent_name}
++            creator={data.creator}
++            creatorAvatar={data.creator_avatar}
++            shortDescription={data.sub_heading}
++            longDescription={data.description}
++            runs={data.runs}
++            categories={data.categories}
++            lastUpdated={String(data.last_updated)}
++            version={data.versions[0] || "1"}
++            storeListingVersionId={data.store_listing_version_id}
++            isAgentAddedToLibrary={false}
++          />
++        </div>
++        <div className="lg:col-span-3">
++          {allMedia.length > 0 ? (
++            <AgentImages images={allMedia} />
++          ) : (
++            <div className="flex h-64 items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25">
++              <p className="text-muted-foreground">
++                No images or videos submitted
++              </p>
++            </div>
++          )}
++        </div>
++      </div>
++
++      {/* Fields not shown in AgentInfo but important for admin review */}
++      <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
++        {data.instructions && (
++          <div className="rounded-lg border p-4">
++            <h3 className="mb-2 text-sm font-semibold text-muted-foreground">
++              Instructions
++            </h3>
++            <p className="whitespace-pre-wrap text-sm">{data.instructions}</p>
++          </div>
++        )}
++        {data.recommended_schedule_cron && (
++          <div className="rounded-lg border p-4">
++            <h3 className="mb-2 text-sm font-semibold text-muted-foreground">
++              Recommended Schedule
++            </h3>
++            <code className="rounded bg-muted px-2 py-1 text-sm">
++              {data.recommended_schedule_cron}
++            </code>
++          </div>
++        )}
++        <div className="rounded-lg border p-4">
++          <h3 className="mb-2 text-sm font-semibold text-muted-foreground">
++            Slug
++          </h3>
++          <code className="rounded bg-muted px-2 py-1 text-sm">
++            {data.slug}
++          </code>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/autogpt_platform/frontend/src/app/api/openapi.json b/autogpt_platform/frontend/src/app/api/openapi.json
+index e5c632e07..f63cc8e34 100644
+--- a/autogpt_platform/frontend/src/app/api/openapi.json
++++ b/autogpt_platform/frontend/src/app/api/openapi.json
+@@ -5680,6 +5680,82 @@
+         }
+       }
+     },
++    "/api/store/admin/submissions/{store_listing_version_id}/add-to-library": {
++      "post": {
++        "tags": ["v2", "admin", "store", "admin"],
++        "summary": "Admin Add Pending Agent to Library",
++        "description": "Add a pending marketplace agent to the admin's library for review.\nUses admin-level access to bypass marketplace APPROVED-only checks.\n\nThe builder can load the graph because get_graph() checks library\nmembership as a fallback: \"you added it, you keep it.\"",
++        "operationId": "postV2Admin add pending agent to library",
++        "security": [{ "HTTPBearerJWT": [] }],
++        "parameters": [
++          {
++            "name": "store_listing_version_id",
++            "in": "path",
++            "required": true,
++            "schema": { "type": "string", "title": "Store Listing Version Id" }
++          }
++        ],
++        "responses": {
++          "201": {
++            "description": "Successful Response",
++            "content": {
++              "application/json": {
++                "schema": { "$ref": "#/components/schemas/LibraryAgent" }
++              }
++            }
++          },
++          "401": {
++            "$ref": "#/components/responses/HTTP401NotAuthenticatedError"
++          },
++          "422": {
++            "description": "Validation Error",
++            "content": {
++              "application/json": {
++                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
++              }
++            }
++          }
++        }
++      }
++    },
++    "/api/store/admin/submissions/{store_listing_version_id}/preview": {
++      "get": {
++        "tags": ["v2", "admin", "store", "admin"],
++        "summary": "Admin Preview Submission Listing",
++        "description": "Preview a marketplace submission as it would appear on the listing page.\nBypasses the APPROVED-only StoreAgent view so admins can preview pending\nsubmissions before approving.",
++        "operationId": "getV2Admin preview submission listing",
++        "security": [{ "HTTPBearerJWT": [] }],
++        "parameters": [
++          {
++            "name": "store_listing_version_id",
++            "in": "path",
++            "required": true,
++            "schema": { "type": "string", "title": "Store Listing Version Id" }
++          }
++        ],
++        "responses": {
++          "200": {
++            "description": "Successful Response",
++            "content": {
++              "application/json": {
++                "schema": { "$ref": "#/components/schemas/StoreAgentDetails" }
++              }
++            }
++          },
++          "401": {
++            "$ref": "#/components/responses/HTTP401NotAuthenticatedError"
++          },
++          "422": {
++            "description": "Validation Error",
++            "content": {
++              "application/json": {
++                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
++              }
++            }
++          }
++        }
++      }
++    },
+     "/api/store/admin/submissions/{store_listing_version_id}/review": {
+       "post": {
+         "tags": ["v2", "admin", "store", "admin"],

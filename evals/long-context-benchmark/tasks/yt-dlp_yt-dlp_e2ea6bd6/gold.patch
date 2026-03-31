@@ -1,0 +1,102 @@
+diff --git a/yt_dlp/extractor/_extractors.py b/yt_dlp/extractor/_extractors.py
+index ea49a25b2..b060db51a 100644
+--- a/yt_dlp/extractor/_extractors.py
++++ b/yt_dlp/extractor/_extractors.py
+@@ -1,32 +1,4 @@
+ # flake8: noqa: F401
+-# isort: off
+-
+-from .youtube import (  # Youtube is moved to the top to improve performance
+-    YoutubeIE,
+-    YoutubeClipIE,
+-    YoutubeFavouritesIE,
+-    YoutubeNotificationsIE,
+-    YoutubeHistoryIE,
+-    YoutubeTabIE,
+-    YoutubeLivestreamEmbedIE,
+-    YoutubePlaylistIE,
+-    YoutubeRecommendedIE,
+-    YoutubeSearchDateIE,
+-    YoutubeSearchIE,
+-    YoutubeSearchURLIE,
+-    YoutubeMusicSearchURLIE,
+-    YoutubeSubscriptionsIE,
+-    YoutubeTruncatedIDIE,
+-    YoutubeTruncatedURLIE,
+-    YoutubeYtBeIE,
+-    YoutubeYtUserIE,
+-    YoutubeWatchLaterIE,
+-    YoutubeShortsAudioPivotIE,
+-    YoutubeConsentRedirectIE,
+-)
+-
+-# isort: on
+-
+ from .abc import (
+     ABCIE,
+     ABCIViewIE,
+@@ -2551,6 +2523,29 @@
+     YouPornTagIE,
+     YouPornVideosIE,
+ )
++from .youtube import (
++    YoutubeClipIE,
++    YoutubeConsentRedirectIE,
++    YoutubeFavouritesIE,
++    YoutubeHistoryIE,
++    YoutubeIE,
++    YoutubeLivestreamEmbedIE,
++    YoutubeMusicSearchURLIE,
++    YoutubeNotificationsIE,
++    YoutubePlaylistIE,
++    YoutubeRecommendedIE,
++    YoutubeSearchDateIE,
++    YoutubeSearchIE,
++    YoutubeSearchURLIE,
++    YoutubeShortsAudioPivotIE,
++    YoutubeSubscriptionsIE,
++    YoutubeTabIE,
++    YoutubeTruncatedIDIE,
++    YoutubeTruncatedURLIE,
++    YoutubeWatchLaterIE,
++    YoutubeYtBeIE,
++    YoutubeYtUserIE,
++)
+ from .zaiko import (
+     ZaikoETicketIE,
+     ZaikoIE,
+diff --git a/yt_dlp/extractor/extractors.py b/yt_dlp/extractor/extractors.py
+index 18a3737d7..e20c2e0b4 100644
+--- a/yt_dlp/extractor/extractors.py
++++ b/yt_dlp/extractor/extractors.py
+@@ -1,4 +1,4 @@
+-import inspect
++import itertools
+ import os
+ 
+ from ..globals import LAZY_EXTRACTORS
+@@ -17,12 +17,18 @@
+ if not _CLASS_LOOKUP:
+     from . import _extractors
+ 
+-    _CLASS_LOOKUP = {
+-        name: value
+-        for name, value in inspect.getmembers(_extractors)
+-        if name.endswith('IE') and name != 'GenericIE'
+-    }
+-    _CLASS_LOOKUP['GenericIE'] = _extractors.GenericIE
++    members = tuple(
++        (name, getattr(_extractors, name))
++        for name in dir(_extractors)
++        if name.endswith('IE')
++    )
++    _CLASS_LOOKUP = dict(itertools.chain(
++        # Add Youtube first to improve matching performance
++        ((name, value) for name, value in members if '.youtube' in value.__module__),
++        # Add Generic last so that it is the fallback
++        ((name, value) for name, value in members if name != 'GenericIE'),
++        (('GenericIE', _extractors.GenericIE),),
++    ))
+ 
+ # We want to append to the main lookup
+ _current = _extractors_context.value

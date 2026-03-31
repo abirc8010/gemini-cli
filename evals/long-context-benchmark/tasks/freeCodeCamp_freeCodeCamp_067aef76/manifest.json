@@ -1,0 +1,13 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_067aef76",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "623e49bf83d9de4e2674985681663baf8159b97f",
+  "solution_commit": "067aef76460d6b01078496b5b23761527de81f68",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "curriculum/challenges/english/blocks/review-javascript-audio-and-video/6723cf27c6e9a0c3f3041385.md",
+    "curriculum/challenges/english/blocks/review-javascript/6723d3cfdd0717d3f1bf27e3.md",
+    "curriculum/challenges/english/blocks/review-js-a11y/683766860f71d4a96e429f3a.md"
+  ]
+}

@@ -1,0 +1,191 @@
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-conditionals/696043ed5bea9c7152b6e699.md b/curriculum/challenges/english/blocks/en-b1-quiz-conditionals/696043ed5bea9c7152b6e699.md
+index 03238a89eb..b093f7d46f 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-conditionals/696043ed5bea9c7152b6e699.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-conditionals/696043ed5bea9c7152b6e699.md
+@@ -74,8 +74,8 @@ Listen to the audio. What does Mark express? <!-- (quiz audio) Mark: If the powe
+ {
+   "audio": {
+     "filename": "B1_7-1.mp3",
+-    "startTimestamp": 4.6,
+-    "finishTimestamp": 7.8
++    "startTimestamp": 4.8,
++    "finishTimestamp": 7.95
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-describe-places-events/69604103d290e1c4131ab27b.md b/curriculum/challenges/english/blocks/en-b1-quiz-describe-places-events/69604103d290e1c4131ab27b.md
+index d76eaa4e00..2e3207733e 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-describe-places-events/69604103d290e1c4131ab27b.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-describe-places-events/69604103d290e1c4131ab27b.md
+@@ -74,8 +74,8 @@ Listen to the audio. Which of the following is NOT an appropriate answer? <!-- (
+ {
+   "audio": {
+     "filename": "B1_1-3.mp3",
+-    "startTimestamp": 0,
+-    "finishTimestamp": 1.7
++    "startTimestamp": 0.2,
++    "finishTimestamp": 1.9
+   },
+   "transcript": [
+     {
+@@ -334,8 +334,8 @@ Listen to the audio. How would you answer this question? <!-- (quiz audio) Anna:
+ {
+   "audio": {
+     "filename": "B1_1-2.mp3",
+-    "startTimestamp": 21,
+-    "finishTimestamp": 23
++    "startTimestamp": 21.2,
++    "finishTimestamp": 23.2
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-express-concerns/69604533db80dd47ad2b3ca0.md b/curriculum/challenges/english/blocks/en-b1-quiz-express-concerns/69604533db80dd47ad2b3ca0.md
+index 54cc4dfc5e..72a68b861b 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-express-concerns/69604533db80dd47ad2b3ca0.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-express-concerns/69604533db80dd47ad2b3ca0.md
+@@ -418,8 +418,8 @@ Listen to the audio. What does Maria mention about the deadline? <!-- (quiz audi
+ {
+   "audio": {
+     "filename": "B1_12-3.mp3",
+-    "startTimestamp": 5.5,
+-    "finishTimestamp": 8.7
++    "startTimestamp": 5.7,
++    "finishTimestamp": 8.76
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-future-continuous-actions/696043b2bbd5b82007ef893d.md b/curriculum/challenges/english/blocks/en-b1-quiz-future-continuous-actions/696043b2bbd5b82007ef893d.md
+index a873dbaa50..eff16aa760 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-future-continuous-actions/696043b2bbd5b82007ef893d.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-future-continuous-actions/696043b2bbd5b82007ef893d.md
+@@ -26,7 +26,7 @@ Which of the following sentences describes someone's intention?
+ 
+ #### --distractors--
+ 
+-`I will review the security policy tomorrow.`
++`I have reviewed the security policy by tomorrow.`
+ 
+ ---
+ 
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-past-activities/696042e15a349be2f4a4579a.md b/curriculum/challenges/english/blocks/en-b1-quiz-past-activities/696042e15a349be2f4a4579a.md
+index fc82b229a3..037ebccf0c 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-past-activities/696042e15a349be2f4a4579a.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-past-activities/696042e15a349be2f4a4579a.md
+@@ -74,8 +74,8 @@ Listen to the audio. How would you answer this question? <!-- (quiz audio) James
+ {
+   "audio": {
+     "filename": "B1_3-1.mp3",
+-    "startTimestamp": 14,
+-    "finishTimestamp": 16.2
++    "startTimestamp": 14.2,
++    "finishTimestamp": 16.4
+   },
+   "transcript": [
+     {
+@@ -282,7 +282,7 @@ Which of the following means to make a decision about something?
+ 
+ #### --distractors--
+ 
+-`To decide about`
++`To decide out`
+ 
+ ---
+ 
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-past-experiences/6960415647143b144f20b94d.md b/curriculum/challenges/english/blocks/en-b1-quiz-past-experiences/6960415647143b144f20b94d.md
+index dbe75c6de8..37741b2d06 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-past-experiences/6960415647143b144f20b94d.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-past-experiences/6960415647143b144f20b94d.md
+@@ -74,8 +74,8 @@ Listen to the audio. How would you answer this question? <!-- (quiz audio) Lisa:
+ {
+   "audio": {
+     "filename": "B1_2-1.mp3",
+-    "startTimestamp": 0,
+-    "finishTimestamp": 2.8
++    "startTimestamp": 0.2,
++    "finishTimestamp": 3
+   },
+   "transcript": [
+     {
+@@ -312,8 +312,8 @@ Listen to the audio. What is asked with this question? <!-- (quiz audio) Jake: W
+ {
+   "audio": {
+     "filename": "B1_2-2.mp3",
+-    "startTimestamp": 8.4,
+-    "finishTimestamp": 9.5
++    "startTimestamp": 8.6,
++    "finishTimestamp": 9.7
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-plan-future-events/696043687613cbc3f7df2413.md b/curriculum/challenges/english/blocks/en-b1-quiz-plan-future-events/696043687613cbc3f7df2413.md
+index 56035c4c2a..b1a6e73abb 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-plan-future-events/696043687613cbc3f7df2413.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-plan-future-events/696043687613cbc3f7df2413.md
+@@ -22,7 +22,7 @@ Read each question and choose the correct answer. There's only one correct answe
+ 
+ #### --text--
+ 
+-Which sentence correctly talks about a planned meeting?
++Which sentence correctly talks about a planned event?
+ 
+ #### --distractors--
+ 
+@@ -30,7 +30,7 @@ Which sentence correctly talks about a planned meeting?
+ 
+ ---
+ 
+-`The project was scheduled for next week.`
++`The project has scheduled for next week.`
+ 
+ ---
+ 
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-present-perfect-accessibility/696043202e8e8cbd72c2de1b.md b/curriculum/challenges/english/blocks/en-b1-quiz-present-perfect-accessibility/696043202e8e8cbd72c2de1b.md
+index f120f7e1fe..907071a4af 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-present-perfect-accessibility/696043202e8e8cbd72c2de1b.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-present-perfect-accessibility/696043202e8e8cbd72c2de1b.md
+@@ -38,7 +38,7 @@ A device used to scan printed documents
+ 
+ #### --answer--
+ 
+-A software tool that reads text on a device aloud
++A software tool that reads text aloud on a device
+ 
+ ### --question--
+ 
+@@ -440,8 +440,8 @@ Listen to the audio. What does it suggest about the results? <!-- (quiz audio) J
+ {
+   "audio": {
+     "filename": "B1_4-4.mp3",
+-    "startTimestamp": 28.5,
+-    "finishTimestamp": 32.3
++    "startTimestamp": 28.7,
++    "finishTimestamp": 32.5
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-share-feedback/6960442c33cde51b9c78d980.md b/curriculum/challenges/english/blocks/en-b1-quiz-share-feedback/6960442c33cde51b9c78d980.md
+index ac1223b10d..2345221720 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-share-feedback/6960442c33cde51b9c78d980.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-share-feedback/6960442c33cde51b9c78d980.md
+@@ -291,7 +291,7 @@ Listen to the audio. What is Brian communicating? <!-- (quiz audio) Brian: True.
+   "audio": {
+     "filename": "B1_8-2.mp3",
+     "startTimestamp": 26,
+-    "finishTimestamp": 31.5
++    "finishTimestamp": 31.7
+   },
+   "transcript": [
+     {
+diff --git a/curriculum/challenges/english/blocks/en-b1-quiz-share-opinions/69604468bd3c7564baa4746e.md b/curriculum/challenges/english/blocks/en-b1-quiz-share-opinions/69604468bd3c7564baa4746e.md
+index 357adb2590..cd80da31e1 100644
+--- a/curriculum/challenges/english/blocks/en-b1-quiz-share-opinions/69604468bd3c7564baa4746e.md
++++ b/curriculum/challenges/english/blocks/en-b1-quiz-share-opinions/69604468bd3c7564baa4746e.md
+@@ -397,7 +397,7 @@ Listen to the audio. What does Maria ask about? <!-- (quiz audio) Maria: We need
+   "audio": {
+     "filename": "B1_9-2.mp3",
+     "startTimestamp": 0,
+-    "finishTimestamp": 4
++    "finishTimestamp": 4.4
+   },
+   "transcript": [
+     {

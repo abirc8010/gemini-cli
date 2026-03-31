@@ -1,0 +1,13 @@
+{
+  "task_id": "yt-dlp_yt-dlp_62574f57",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "abade83f8ddb63a11746b69038ebcd9c1405a00a",
+  "solution_commit": "62574f5763755a8637880044630b12582e4a55a5",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "test/test_jsinterp.py",
+    "yt_dlp/extractor/xhamster.py",
+    "yt_dlp/jsinterp.py"
+  ]
+}

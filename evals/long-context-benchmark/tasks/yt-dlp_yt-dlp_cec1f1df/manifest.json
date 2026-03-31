@@ -1,0 +1,13 @@
+{
+  "task_id": "yt-dlp_yt-dlp_cec1f1df",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "ba499ab0dcf2486d97f739e155264b305e0abd26",
+  "solution_commit": "cec1f1df792fe521fff2d5ca54b5c70094b3d96a",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "README.md",
+    "test/test_postprocessors.py",
+    "yt_dlp/postprocessor/metadataparser.py"
+  ]
+}

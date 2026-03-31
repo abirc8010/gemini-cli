@@ -1,0 +1,23 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_866563ad",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "e79928a815b6ac703e7ce2f8eeee165e85cc1d5e",
+  "solution_commit": "866563ad25a663b5960b369df3c4cca0146755dc",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/api/features/admin/store_admin_routes.py",
+    "autogpt_platform/backend/backend/api/features/admin/store_admin_routes_test.py",
+    "autogpt_platform/backend/backend/api/features/library/_add_to_library.py",
+    "autogpt_platform/backend/backend/api/features/library/_add_to_library_test.py",
+    "autogpt_platform/backend/backend/api/features/library/db.py",
+    "autogpt_platform/backend/backend/api/features/library/db_test.py",
+    "autogpt_platform/backend/backend/api/features/store/db.py",
+    "autogpt_platform/backend/backend/data/graph.py",
+    "autogpt_platform/backend/backend/data/graph_test.py",
+    "autogpt_platform/frontend/src/app/(platform)/admin/marketplace/actions.ts",
+    "autogpt_platform/frontend/src/app/(platform)/admin/marketplace/components/ExpandleRow.tsx",
+    "autogpt_platform/frontend/src/app/(platform)/admin/marketplace/preview/[id]/page.tsx",
+    "autogpt_platform/frontend/src/app/api/openapi.json"
+  ]
+}

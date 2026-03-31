@@ -1,0 +1,77 @@
+diff --git a/curriculum/challenges/english/blocks/lecture-booleans-and-conditionals/67fe85a3db9bad35f2b6a2bd.md b/curriculum/challenges/english/blocks/lecture-booleans-and-conditionals/67fe85a3db9bad35f2b6a2bd.md
+index fa82bff786..e1be1b86f4 100644
+--- a/curriculum/challenges/english/blocks/lecture-booleans-and-conditionals/67fe85a3db9bad35f2b6a2bd.md
++++ b/curriculum/challenges/english/blocks/lecture-booleans-and-conditionals/67fe85a3db9bad35f2b6a2bd.md
+@@ -144,7 +144,7 @@ else:
+     print('You are a child') # You are a child
+ ```
+ 
+-Note that you can use as many `elif` statements as you want:
++Note that you can use as many `elif` clauses as you want:
+ 
+ ```python
+ age = 2
+diff --git a/curriculum/challenges/english/blocks/lecture-understanding-error-handling/688c8ef26f3cad09f36b95b9.md b/curriculum/challenges/english/blocks/lecture-understanding-error-handling/688c8ef26f3cad09f36b95b9.md
+index add02560c3..7a84fd565c 100644
+--- a/curriculum/challenges/english/blocks/lecture-understanding-error-handling/688c8ef26f3cad09f36b95b9.md
++++ b/curriculum/challenges/english/blocks/lecture-understanding-error-handling/688c8ef26f3cad09f36b95b9.md
+@@ -40,9 +40,9 @@ def divide(a, b):
+ print(divide(10, 2))
+ ```
+ 
+-By setting a trace with the `.set_trace()` method, you can step through the code, inspect variables, and understand the program's behavior.
++By setting a trace with the `set_trace()` function, you can step through the code, inspect variables, and understand the program's behavior.
+ 
+-If you run the code above, you'll see some output showing the location of the file you're running, the line where you called the `.set_trace()` method and the code immediately after it, and an interactive `pdb` prompt:
++If you run the code above, you'll see some output showing the location of the file you're running, the line where you called the `set_trace()` function and the code immediately after it, and an interactive `pdb` prompt:
+ 
+ ```py
+ > /Users/fcc/Desktop/debugging.py(5)divide()
+diff --git a/curriculum/challenges/english/blocks/review-error-handling/67f39bcb48373420f4f12d62.md b/curriculum/challenges/english/blocks/review-error-handling/67f39bcb48373420f4f12d62.md
+index 837a71e164..1b25d251b6 100644
+--- a/curriculum/challenges/english/blocks/review-error-handling/67f39bcb48373420f4f12d62.md
++++ b/curriculum/challenges/english/blocks/review-error-handling/67f39bcb48373420f4f12d62.md
+@@ -18,7 +18,7 @@ dashedName: review-error-handling
+ ## Good Debugging Techniques in Python
+ 
+ - **Using the `print` function**: Inserting `print()` statements around various points in your code while debugging helps you see the values of variables and how your code flows.
+-- **Using Python's Built-in Debugger (`pdb`)**: Python provides a `pdb` module for debugging. It's a part of the Python's standard library, so it's always available to use. With `pdb`, you can set a trace with the `set_trace()` method so you can start stepping through the code and inspect variables in an interactive way.
++- **Using Python's Built-in Debugger (`pdb`)**: Python provides a `pdb` module for debugging. It's a part of the Python's standard library, so it's always available to use. With `pdb`, you can set a trace with the `set_trace()` function so you can start stepping through the code and inspect variables in an interactive way.
+ - **Leveraging IDE Debugging Tools**: Many integrated development environments (IDEs) and code editors like Pycharm and VS Code offer debugging tools with breakpoints, step execution, variable inspection, and other debugging features.
+ 
+ ## Exception Handling
+diff --git a/curriculum/challenges/english/blocks/review-python-basics/67f39b40deaec81a3e40e0c5.md b/curriculum/challenges/english/blocks/review-python-basics/67f39b40deaec81a3e40e0c5.md
+index 1e514bd81f..27fb93d20f 100644
+--- a/curriculum/challenges/english/blocks/review-python-basics/67f39b40deaec81a3e40e0c5.md
++++ b/curriculum/challenges/english/blocks/review-python-basics/67f39b40deaec81a3e40e0c5.md
+@@ -714,7 +714,7 @@ if age >= 18:
+     print('You are an adult') # You are an adult
+ ```
+ 
+-- **`elif` Statement**: These are conditions that come after an `if` statement. An `elif` block runs only if all previous conditions evaluate to `False` and its own condition evaluates to `True`.
++- **`elif` Clause**: These are conditions that come after an `if` statement. An `elif` clause runs only if all previous conditions evaluate to `False` and its own condition evaluates to `True`.
+ 
+ ```py
+ age = 16
+diff --git a/curriculum/challenges/english/blocks/review-python/67f39e391c9b373069def02c.md b/curriculum/challenges/english/blocks/review-python/67f39e391c9b373069def02c.md
+index 4139fa6ad0..8f4aa5c27a 100644
+--- a/curriculum/challenges/english/blocks/review-python/67f39e391c9b373069def02c.md
++++ b/curriculum/challenges/english/blocks/review-python/67f39e391c9b373069def02c.md
+@@ -714,7 +714,7 @@ if age >= 18:
+     print('You are an adult') # You are an adult
+ ```
+ 
+-- **`elif` Statement**: These are conditions that come after an `if` statement. If the `elif` condition evaluates to `True`, then that block of code will run.
++- **`elif` Clause**: These are conditions that come after an `if` statement. If the `elif` condition evaluates to `True`, then that block of code will run.
+ 
+ ```py
+ age = 16
+@@ -1960,7 +1960,7 @@ if __name__ == '__main__':
+ ## Good Debugging Techniques in Python
+ 
+ - **Using the `print` function**: Inserting `print()` statements around various points in your code while debugging helps you see the values of variables and how your code flows.
+-- **Using Python's Built-in Debugger (`pdb`)**: Python provides a `pdb` module for debugging. It's a part of the Python's standard library, so it's always available to use. With `pdb`, you can set a trace with the `set_trace()` method so you can start stepping through the code and inspect variables in an interactive way.
++- **Using Python's Built-in Debugger (`pdb`)**: Python provides a `pdb` module for debugging. It's a part of the Python's standard library, so it's always available to use. With `pdb`, you can set a trace with the `set_trace()` function so you can start stepping through the code and inspect variables in an interactive way.
+ - **Leveraging IDE Debugging Tools**: Many integrated development environments (IDEs) and code editors like Pycharm and VS Code offer debugging tools with breakpoints, step execution, variable inspection, and other debugging features.
+ 
+ ## Exception Handling

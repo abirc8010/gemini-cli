@@ -1,0 +1,833 @@
+diff --git a/autogpt_platform/backend/backend/api/external/v1/integrations.py b/autogpt_platform/backend/backend/api/external/v1/integrations.py
+index a3df481a6..10e6f7a65 100644
+--- a/autogpt_platform/backend/backend/api/external/v1/integrations.py
++++ b/autogpt_platform/backend/backend/api/external/v1/integrations.py
+@@ -18,15 +18,20 @@ from pydantic import BaseModel, Field, SecretStr
+ 
+ from backend.api.external.middleware import require_permission
+ from backend.api.features.integrations.models import get_all_provider_names
++from backend.api.features.integrations.router import (
++    CredentialsMetaResponse,
++    to_meta_response,
++)
+ from backend.data.auth.base import APIAuthorizationInfo
+ from backend.data.model import (
+     APIKeyCredentials,
+     Credentials,
+     CredentialsType,
+     HostScopedCredentials,
+-    OAuth2Credentials,
+     UserPasswordCredentials,
++    is_sdk_default,
+ )
++from backend.integrations.credentials_store import provider_matches
+ from backend.integrations.creds_manager import IntegrationCredentialsManager
+ from backend.integrations.oauth import CREDENTIALS_BY_PROVIDER, HANDLERS_BY_NAME
+ from backend.integrations.providers import ProviderName
+@@ -91,18 +96,6 @@ class OAuthCompleteResponse(BaseModel):
+     )
+ 
+ 
+-class CredentialSummary(BaseModel):
+-    """Summary of a credential without sensitive data."""
+-
+-    id: str
+-    provider: str
+-    type: CredentialsType
+-    title: Optional[str] = None
+-    scopes: Optional[list[str]] = None
+-    username: Optional[str] = None
+-    host: Optional[str] = None
+-
+-
+ class ProviderInfo(BaseModel):
+     """Information about an integration provider."""
+ 
+@@ -473,12 +466,12 @@ async def complete_oauth(
+     )
+ 
+ 
+-@integrations_router.get("/credentials", response_model=list[CredentialSummary])
++@integrations_router.get("/credentials", response_model=list[CredentialsMetaResponse])
+ async def list_credentials(
+     auth: APIAuthorizationInfo = Security(
+         require_permission(APIKeyPermission.READ_INTEGRATIONS)
+     ),
+-) -> list[CredentialSummary]:
++) -> list[CredentialsMetaResponse]:
+     """
+     List all credentials for the authenticated user.
+ 
+@@ -486,28 +479,19 @@ async def list_credentials(
+     """
+     credentials = await creds_manager.store.get_all_creds(auth.user_id)
+     return [
+-        CredentialSummary(
+-            id=cred.id,
+-            provider=cred.provider,
+-            type=cred.type,
+-            title=cred.title,
+-            scopes=cred.scopes if isinstance(cred, OAuth2Credentials) else None,
+-            username=cred.username if isinstance(cred, OAuth2Credentials) else None,
+-            host=cred.host if isinstance(cred, HostScopedCredentials) else None,
+-        )
+-        for cred in credentials
++        to_meta_response(cred) for cred in credentials if not is_sdk_default(cred.id)
+     ]
+ 
+ 
+ @integrations_router.get(
+-    "/{provider}/credentials", response_model=list[CredentialSummary]
++    "/{provider}/credentials", response_model=list[CredentialsMetaResponse]
+ )
+ async def list_credentials_by_provider(
+     provider: Annotated[str, Path(title="The provider to list credentials for")],
+     auth: APIAuthorizationInfo = Security(
+         require_permission(APIKeyPermission.READ_INTEGRATIONS)
+     ),
+-) -> list[CredentialSummary]:
++) -> list[CredentialsMetaResponse]:
+     """
+     List credentials for a specific provider.
+     """
+@@ -515,16 +499,7 @@ async def list_credentials_by_provider(
+         auth.user_id, provider
+     )
+     return [
+-        CredentialSummary(
+-            id=cred.id,
+-            provider=cred.provider,
+-            type=cred.type,
+-            title=cred.title,
+-            scopes=cred.scopes if isinstance(cred, OAuth2Credentials) else None,
+-            username=cred.username if isinstance(cred, OAuth2Credentials) else None,
+-            host=cred.host if isinstance(cred, HostScopedCredentials) else None,
+-        )
+-        for cred in credentials
++        to_meta_response(cred) for cred in credentials if not is_sdk_default(cred.id)
+     ]
+ 
+ 
+@@ -597,11 +572,11 @@ async def create_credential(
+     # Store credentials
+     try:
+         await creds_manager.create(auth.user_id, credentials)
+-    except Exception as e:
+-        logger.error(f"Failed to store credentials: {e}")
++    except Exception:
++        logger.exception("Failed to store credentials")
+         raise HTTPException(
+             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-            detail=f"Failed to store credentials: {str(e)}",
++            detail="Failed to store credentials",
+         )
+ 
+     logger.info(f"Created {request.type} credentials for provider {provider}")
+@@ -639,15 +614,18 @@ async def delete_credential(
+     use the main API's delete endpoint which handles webhook cleanup and
+     token revocation.
+     """
++    if is_sdk_default(cred_id):
++        raise HTTPException(
++            status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
++        )
+     creds = await creds_manager.store.get_creds_by_id(auth.user_id, cred_id)
+     if not creds:
+         raise HTTPException(
+             status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
+         )
+-    if creds.provider != provider:
++    if not provider_matches(creds.provider, provider):
+         raise HTTPException(
+-            status_code=status.HTTP_404_NOT_FOUND,
+-            detail="Credentials do not match the specified provider",
++            status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
+         )
+ 
+     await creds_manager.delete(auth.user_id, cred_id)
+diff --git a/autogpt_platform/backend/backend/api/features/integrations/conftest.py b/autogpt_platform/backend/backend/api/features/integrations/conftest.py
+new file mode 100644
+index 000000000..d87d12570
+--- /dev/null
++++ b/autogpt_platform/backend/backend/api/features/integrations/conftest.py
+@@ -0,0 +1,13 @@
++"""Override session-scoped fixtures so unit tests run without the server."""
++
++import pytest
++
++
++@pytest.fixture(scope="session")
++def server():
++    yield None
++
++
++@pytest.fixture(scope="session", autouse=True)
++def graph_cleanup():
++    yield
+diff --git a/autogpt_platform/backend/backend/api/features/integrations/router.py b/autogpt_platform/backend/backend/api/features/integrations/router.py
+index 4eacf83e7..8d56ede9b 100644
+--- a/autogpt_platform/backend/backend/api/features/integrations/router.py
++++ b/autogpt_platform/backend/backend/api/features/integrations/router.py
+@@ -34,6 +34,7 @@ from backend.data.model import (
+     HostScopedCredentials,
+     OAuth2Credentials,
+     UserIntegrations,
++    is_sdk_default,
+ )
+ from backend.data.onboarding import OnboardingStep, complete_onboarding_step
+ from backend.data.user import get_user_integrations
+@@ -138,6 +139,18 @@ class CredentialsMetaResponse(BaseModel):
+         return None
+ 
+ 
++def to_meta_response(cred: Credentials) -> CredentialsMetaResponse:
++    return CredentialsMetaResponse(
++        id=cred.id,
++        provider=cred.provider,
++        type=cred.type,
++        title=cred.title,
++        scopes=cred.scopes if isinstance(cred, OAuth2Credentials) else None,
++        username=cred.username if isinstance(cred, OAuth2Credentials) else None,
++        host=CredentialsMetaResponse.get_host(cred),
++    )
++
++
+ @router.post("/{provider}/callback", summary="Exchange OAuth code for tokens")
+ async def callback(
+     provider: Annotated[
+@@ -204,15 +217,7 @@ async def callback(
+         f"and provider {provider.value}"
+     )
+ 
+-    return CredentialsMetaResponse(
+-        id=credentials.id,
+-        provider=credentials.provider,
+-        type=credentials.type,
+-        title=credentials.title,
+-        scopes=credentials.scopes,
+-        username=credentials.username,
+-        host=(CredentialsMetaResponse.get_host(credentials)),
+-    )
++    return to_meta_response(credentials)
+ 
+ 
+ @router.get("/credentials", summary="List Credentials")
+@@ -222,16 +227,7 @@ async def list_credentials(
+     credentials = await creds_manager.store.get_all_creds(user_id)
+ 
+     return [
+-        CredentialsMetaResponse(
+-            id=cred.id,
+-            provider=cred.provider,
+-            type=cred.type,
+-            title=cred.title,
+-            scopes=cred.scopes if isinstance(cred, OAuth2Credentials) else None,
+-            username=cred.username if isinstance(cred, OAuth2Credentials) else None,
+-            host=CredentialsMetaResponse.get_host(cred),
+-        )
+-        for cred in credentials
++        to_meta_response(cred) for cred in credentials if not is_sdk_default(cred.id)
+     ]
+ 
+ 
+@@ -245,16 +241,7 @@ async def list_credentials_by_provider(
+     credentials = await creds_manager.store.get_creds_by_provider(user_id, provider)
+ 
+     return [
+-        CredentialsMetaResponse(
+-            id=cred.id,
+-            provider=cred.provider,
+-            type=cred.type,
+-            title=cred.title,
+-            scopes=cred.scopes if isinstance(cred, OAuth2Credentials) else None,
+-            username=cred.username if isinstance(cred, OAuth2Credentials) else None,
+-            host=CredentialsMetaResponse.get_host(cred),
+-        )
+-        for cred in credentials
++        to_meta_response(cred) for cred in credentials if not is_sdk_default(cred.id)
+     ]
+ 
+ 
+@@ -267,18 +254,21 @@ async def get_credential(
+     ],
+     cred_id: Annotated[str, Path(title="The ID of the credentials to retrieve")],
+     user_id: Annotated[str, Security(get_user_id)],
+-) -> Credentials:
++) -> CredentialsMetaResponse:
++    if is_sdk_default(cred_id):
++        raise HTTPException(
++            status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
++        )
+     credential = await creds_manager.get(user_id, cred_id)
+     if not credential:
+         raise HTTPException(
+             status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
+         )
+-    if credential.provider != provider:
++    if not provider_matches(credential.provider, provider):
+         raise HTTPException(
+-            status_code=status.HTTP_404_NOT_FOUND,
+-            detail="Credentials do not match the specified provider",
++            status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
+         )
+-    return credential
++    return to_meta_response(credential)
+ 
+ 
+ @router.post("/{provider}/credentials", status_code=201, summary="Create Credentials")
+@@ -288,16 +278,22 @@ async def create_credentials(
+         ProviderName, Path(title="The provider to create credentials for")
+     ],
+     credentials: Credentials,
+-) -> Credentials:
++) -> CredentialsMetaResponse:
++    if is_sdk_default(credentials.id):
++        raise HTTPException(
++            status_code=status.HTTP_403_FORBIDDEN,
++            detail="Cannot create credentials with a reserved ID",
++        )
+     credentials.provider = provider
+     try:
+         await creds_manager.create(user_id, credentials)
+-    except Exception as e:
++    except Exception:
++        logger.exception("Failed to store credentials")
+         raise HTTPException(
+             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+-            detail=f"Failed to store credentials: {str(e)}",
++            detail="Failed to store credentials",
+         )
+-    return credentials
++    return to_meta_response(credentials)
+ 
+ 
+ class CredentialsDeletionResponse(BaseModel):
+@@ -332,15 +328,19 @@ async def delete_credentials(
+         bool, Query(title="Whether to proceed if any linked webhooks are still in use")
+     ] = False,
+ ) -> CredentialsDeletionResponse | CredentialsDeletionNeedsConfirmationResponse:
++    if is_sdk_default(cred_id):
++        raise HTTPException(
++            status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
++        )
+     creds = await creds_manager.store.get_creds_by_id(user_id, cred_id)
+     if not creds:
+         raise HTTPException(
+             status_code=status.HTTP_404_NOT_FOUND, detail="Credentials not found"
+         )
+-    if creds.provider != provider:
++    if not provider_matches(creds.provider, provider):
+         raise HTTPException(
+             status_code=status.HTTP_404_NOT_FOUND,
+-            detail="Credentials do not match the specified provider",
++            detail="Credentials not found",
+         )
+ 
+     try:
+diff --git a/autogpt_platform/backend/backend/api/features/integrations/router_test.py b/autogpt_platform/backend/backend/api/features/integrations/router_test.py
+new file mode 100644
+index 000000000..39e397a07
+--- /dev/null
++++ b/autogpt_platform/backend/backend/api/features/integrations/router_test.py
+@@ -0,0 +1,278 @@
++"""Tests for credentials API security: no secret leakage, SDK defaults filtered."""
++
++from unittest.mock import AsyncMock, patch
++
++import fastapi
++import fastapi.testclient
++import pytest
++from pydantic import SecretStr
++
++from backend.api.features.integrations.router import router
++from backend.data.model import (
++    APIKeyCredentials,
++    HostScopedCredentials,
++    OAuth2Credentials,
++    UserPasswordCredentials,
++)
++
++app = fastapi.FastAPI()
++app.include_router(router)
++client = fastapi.testclient.TestClient(app)
++
++TEST_USER_ID = "test-user-id"
++
++
++def _make_api_key_cred(cred_id: str = "cred-123", provider: str = "openai"):
++    return APIKeyCredentials(
++        id=cred_id,
++        provider=provider,
++        title="My API Key",
++        api_key=SecretStr("sk-secret-key-value"),
++    )
++
++
++def _make_oauth2_cred(cred_id: str = "cred-456", provider: str = "github"):
++    return OAuth2Credentials(
++        id=cred_id,
++        provider=provider,
++        title="My OAuth",
++        access_token=SecretStr("ghp_secret_token"),
++        refresh_token=SecretStr("ghp_refresh_secret"),
++        scopes=["repo", "user"],
++        username="testuser",
++    )
++
++
++def _make_user_password_cred(cred_id: str = "cred-789", provider: str = "openai"):
++    return UserPasswordCredentials(
++        id=cred_id,
++        provider=provider,
++        title="My Login",
++        username=SecretStr("admin"),
++        password=SecretStr("s3cret-pass"),
++    )
++
++
++def _make_host_scoped_cred(cred_id: str = "cred-host", provider: str = "openai"):
++    return HostScopedCredentials(
++        id=cred_id,
++        provider=provider,
++        title="Host Cred",
++        host="https://api.example.com",
++        headers={"Authorization": SecretStr("Bearer top-secret")},
++    )
++
++
++def _make_sdk_default_cred(provider: str = "openai"):
++    return APIKeyCredentials(
++        id=f"{provider}-default",
++        provider=provider,
++        title=f"{provider} (default)",
++        api_key=SecretStr("sk-platform-secret-key"),
++    )
++
++
++@pytest.fixture(autouse=True)
++def setup_auth(mock_jwt_user):
++    from autogpt_libs.auth.jwt_utils import get_jwt_payload
++
++    app.dependency_overrides[get_jwt_payload] = mock_jwt_user["get_jwt_payload"]
++    yield
++    app.dependency_overrides.clear()
++
++
++class TestGetCredentialReturnsMetaOnly:
++    """GET /{provider}/credentials/{cred_id} must not return secrets."""
++
++    def test_api_key_credential_no_secret(self):
++        cred = _make_api_key_cred()
++        with (
++            patch.object(router, "dependencies", []),
++            patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
++        ):
++            mock_mgr.get = AsyncMock(return_value=cred)
++            resp = client.get("/openai/credentials/cred-123")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        assert data["id"] == "cred-123"
++        assert data["provider"] == "openai"
++        assert data["type"] == "api_key"
++        assert "api_key" not in data
++        assert "sk-secret-key-value" not in str(data)
++
++    def test_oauth2_credential_no_secret(self):
++        cred = _make_oauth2_cred()
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.get = AsyncMock(return_value=cred)
++            resp = client.get("/github/credentials/cred-456")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        assert data["id"] == "cred-456"
++        assert data["scopes"] == ["repo", "user"]
++        assert data["username"] == "testuser"
++        assert "access_token" not in data
++        assert "refresh_token" not in data
++        assert "ghp_" not in str(data)
++
++    def test_user_password_credential_no_secret(self):
++        cred = _make_user_password_cred()
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.get = AsyncMock(return_value=cred)
++            resp = client.get("/openai/credentials/cred-789")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        assert data["id"] == "cred-789"
++        assert "password" not in data
++        assert "username" not in data or data["username"] is None
++        assert "s3cret-pass" not in str(data)
++        assert "admin" not in str(data)
++
++    def test_host_scoped_credential_no_secret(self):
++        cred = _make_host_scoped_cred()
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.get = AsyncMock(return_value=cred)
++            resp = client.get("/openai/credentials/cred-host")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        assert data["id"] == "cred-host"
++        assert data["host"] == "https://api.example.com"
++        assert "headers" not in data
++        assert "top-secret" not in str(data)
++
++    def test_get_credential_wrong_provider_returns_404(self):
++        """Provider mismatch should return generic 404, not leak credential existence."""
++        cred = _make_api_key_cred(provider="openai")
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.get = AsyncMock(return_value=cred)
++            resp = client.get("/github/credentials/cred-123")
++
++        assert resp.status_code == 404
++        assert resp.json()["detail"] == "Credentials not found"
++
++    def test_list_credentials_no_secrets(self):
++        """List endpoint must not leak secrets in any credential."""
++        creds = [_make_api_key_cred(), _make_oauth2_cred()]
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.store.get_all_creds = AsyncMock(return_value=creds)
++            resp = client.get("/credentials")
++
++        assert resp.status_code == 200
++        raw = str(resp.json())
++        assert "sk-secret-key-value" not in raw
++        assert "ghp_secret_token" not in raw
++        assert "ghp_refresh_secret" not in raw
++
++
++class TestSdkDefaultCredentialsNotAccessible:
++    """SDK default credentials (ID ending in '-default') must be hidden."""
++
++    def test_get_sdk_default_returns_404(self):
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.get = AsyncMock()
++            resp = client.get("/openai/credentials/openai-default")
++
++        assert resp.status_code == 404
++        mock_mgr.get.assert_not_called()
++
++    def test_list_credentials_excludes_sdk_defaults(self):
++        user_cred = _make_api_key_cred()
++        sdk_cred = _make_sdk_default_cred("openai")
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.store.get_all_creds = AsyncMock(return_value=[user_cred, sdk_cred])
++            resp = client.get("/credentials")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        ids = [c["id"] for c in data]
++        assert "cred-123" in ids
++        assert "openai-default" not in ids
++
++    def test_list_by_provider_excludes_sdk_defaults(self):
++        user_cred = _make_api_key_cred()
++        sdk_cred = _make_sdk_default_cred("openai")
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.store.get_creds_by_provider = AsyncMock(
++                return_value=[user_cred, sdk_cred]
++            )
++            resp = client.get("/openai/credentials")
++
++        assert resp.status_code == 200
++        data = resp.json()
++        ids = [c["id"] for c in data]
++        assert "cred-123" in ids
++        assert "openai-default" not in ids
++
++    def test_delete_sdk_default_returns_404(self):
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.store.get_creds_by_id = AsyncMock()
++            resp = client.request("DELETE", "/openai/credentials/openai-default")
++
++        assert resp.status_code == 404
++        mock_mgr.store.get_creds_by_id.assert_not_called()
++
++
++class TestCreateCredentialNoSecretInResponse:
++    """POST /{provider}/credentials must not return secrets."""
++
++    def test_create_api_key_no_secret_in_response(self):
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.create = AsyncMock()
++            resp = client.post(
++                "/openai/credentials",
++                json={
++                    "id": "new-cred",
++                    "provider": "openai",
++                    "type": "api_key",
++                    "title": "New Key",
++                    "api_key": "sk-newsecret",
++                },
++            )
++
++        assert resp.status_code == 201
++        data = resp.json()
++        assert data["id"] == "new-cred"
++        assert "api_key" not in data
++        assert "sk-newsecret" not in str(data)
++
++    def test_create_with_sdk_default_id_rejected(self):
++        with patch(
++            "backend.api.features.integrations.router.creds_manager"
++        ) as mock_mgr:
++            mock_mgr.create = AsyncMock()
++            resp = client.post(
++                "/openai/credentials",
++                json={
++                    "id": "openai-default",
++                    "provider": "openai",
++                    "type": "api_key",
++                    "title": "Sneaky",
++                    "api_key": "sk-evil",
++                },
++            )
++
++        assert resp.status_code == 403
++        mock_mgr.create.assert_not_called()
+diff --git a/autogpt_platform/backend/backend/api/rest_api.py b/autogpt_platform/backend/backend/api/rest_api.py
+index d48620ee6..5e47256e5 100644
+--- a/autogpt_platform/backend/backend/api/rest_api.py
++++ b/autogpt_platform/backend/backend/api/rest_api.py
+@@ -521,8 +521,11 @@ class AgentServer(backend.util.service.AppProcess):
+         user_id: str,
+         provider: ProviderName,
+         credentials: Credentials,
+-    ) -> Credentials:
+-        from .features.integrations.router import create_credentials, get_credential
++    ):
++        from backend.api.features.integrations.router import (
++            create_credentials,
++            get_credential,
++        )
+ 
+         try:
+             return await create_credentials(
+diff --git a/autogpt_platform/backend/backend/data/model.py b/autogpt_platform/backend/backend/data/model.py
+index c9d8c5879..3abce7573 100644
+--- a/autogpt_platform/backend/backend/data/model.py
++++ b/autogpt_platform/backend/backend/data/model.py
+@@ -312,6 +312,15 @@ def SchemaField(
+     )  # type: ignore
+ 
+ 
++# SDK default credentials use IDs like "{provider}-default" (set in sdk/builder.py).
++# They must never be exposed to users via the API.
++SDK_DEFAULT_SUFFIX = "-default"
++
++
++def is_sdk_default(cred_id: str) -> bool:
++    return cred_id.endswith(SDK_DEFAULT_SUFFIX)
++
++
+ class _BaseCredentials(BaseModel):
+     id: str = Field(default_factory=lambda: str(uuid4()))
+     provider: str
+diff --git a/autogpt_platform/backend/backend/sdk/registry.py b/autogpt_platform/backend/backend/sdk/registry.py
+index 5543a3ed9..e724969a4 100644
+--- a/autogpt_platform/backend/backend/sdk/registry.py
++++ b/autogpt_platform/backend/backend/sdk/registry.py
+@@ -202,40 +202,31 @@ class AutoRegistry:
+ 
+         # Patch credentials store to include SDK-registered credentials
+         try:
+-            import sys
+-            from typing import Any
++            # Lazy import: credentials_store depends on settings which may not
++            # be fully initialized at class-definition time.
++            from backend.integrations.credentials_store import (
++                IntegrationCredentialsStore,
++            )
+ 
+-            # Get the module from sys.modules to respect mocking
+-            if "backend.integrations.credentials_store" in sys.modules:
+-                creds_store: Any = sys.modules["backend.integrations.credentials_store"]
+-            else:
+-                import backend.integrations.credentials_store
++            original_get_all_creds = IntegrationCredentialsStore.get_all_creds
+ 
+-                creds_store: Any = backend.integrations.credentials_store
++            async def patched_get_all_creds(
++                self: IntegrationCredentialsStore, user_id: str
++            ) -> list[Credentials]:
++                original_creds = await original_get_all_creds(self, user_id)
+ 
+-            if hasattr(creds_store, "IntegrationCredentialsStore"):
+-                store_class = creds_store.IntegrationCredentialsStore
+-                if hasattr(store_class, "get_all_creds"):
+-                    original_get_all_creds = store_class.get_all_creds
++                sdk_creds = cls.get_all_credentials()
+ 
+-                    async def patched_get_all_creds(self, user_id: str):
+-                        # Get original credentials
+-                        original_creds = await original_get_all_creds(self, user_id)
++                existing_ids = {c.id for c in original_creds}
++                for cred in sdk_creds:
++                    if cred.id not in existing_ids:
++                        original_creds.append(cred)
+ 
+-                        # Add SDK-registered credentials
+-                        sdk_creds = cls.get_all_credentials()
++                return original_creds
+ 
+-                        # Combine credentials, avoiding duplicates by ID
+-                        existing_ids = {c.id for c in original_creds}
+-                        for cred in sdk_creds:
+-                            if cred.id not in existing_ids:
+-                                original_creds.append(cred)
+-
+-                        return original_creds
+-
+-                    store_class.get_all_creds = patched_get_all_creds
+-                    logger.info(
+-                        "Successfully patched IntegrationCredentialsStore.get_all_creds"
+-                    )
++            IntegrationCredentialsStore.get_all_creds = patched_get_all_creds
++            logger.info(
++                "Successfully patched IntegrationCredentialsStore.get_all_creds"
++            )
+         except Exception as e:
+             logging.warning(f"Failed to patch credentials store: {e}")
+diff --git a/autogpt_platform/frontend/src/app/api/openapi.json b/autogpt_platform/frontend/src/app/api/openapi.json
+index 84c00cf5b..21a4e7aa7 100644
+--- a/autogpt_platform/frontend/src/app/api/openapi.json
++++ b/autogpt_platform/frontend/src/app/api/openapi.json
+@@ -3227,7 +3227,7 @@
+                   { "$ref": "#/components/schemas/OAuth2Credentials" },
+                   { "$ref": "#/components/schemas/APIKeyCredentials" },
+                   { "$ref": "#/components/schemas/UserPasswordCredentials" },
+-                  { "$ref": "#/components/schemas/HostScopedCredentials-Input" }
++                  { "$ref": "#/components/schemas/HostScopedCredentials" }
+                 ],
+                 "discriminator": {
+                   "propertyName": "type",
+@@ -3235,7 +3235,7 @@
+                     "oauth2": "#/components/schemas/OAuth2Credentials",
+                     "api_key": "#/components/schemas/APIKeyCredentials",
+                     "user_password": "#/components/schemas/UserPasswordCredentials",
+-                    "host_scoped": "#/components/schemas/HostScopedCredentials-Input"
++                    "host_scoped": "#/components/schemas/HostScopedCredentials"
+                   }
+                 },
+                 "title": "Credentials"
+@@ -3249,24 +3249,7 @@
+             "content": {
+               "application/json": {
+                 "schema": {
+-                  "oneOf": [
+-                    { "$ref": "#/components/schemas/OAuth2Credentials" },
+-                    { "$ref": "#/components/schemas/APIKeyCredentials" },
+-                    { "$ref": "#/components/schemas/UserPasswordCredentials" },
+-                    {
+-                      "$ref": "#/components/schemas/HostScopedCredentials-Output"
+-                    }
+-                  ],
+-                  "discriminator": {
+-                    "propertyName": "type",
+-                    "mapping": {
+-                      "oauth2": "#/components/schemas/OAuth2Credentials",
+-                      "api_key": "#/components/schemas/APIKeyCredentials",
+-                      "user_password": "#/components/schemas/UserPasswordCredentials",
+-                      "host_scoped": "#/components/schemas/HostScopedCredentials-Output"
+-                    }
+-                  },
+-                  "title": "Response Postv1Create Credentials"
++                  "$ref": "#/components/schemas/CredentialsMetaResponse"
+                 }
+               }
+             }
+@@ -3386,24 +3369,7 @@
+             "content": {
+               "application/json": {
+                 "schema": {
+-                  "oneOf": [
+-                    { "$ref": "#/components/schemas/OAuth2Credentials" },
+-                    { "$ref": "#/components/schemas/APIKeyCredentials" },
+-                    { "$ref": "#/components/schemas/UserPasswordCredentials" },
+-                    {
+-                      "$ref": "#/components/schemas/HostScopedCredentials-Output"
+-                    }
+-                  ],
+-                  "discriminator": {
+-                    "propertyName": "type",
+-                    "mapping": {
+-                      "oauth2": "#/components/schemas/OAuth2Credentials",
+-                      "api_key": "#/components/schemas/APIKeyCredentials",
+-                      "user_password": "#/components/schemas/UserPasswordCredentials",
+-                      "host_scoped": "#/components/schemas/HostScopedCredentials-Output"
+-                    }
+-                  },
+-                  "title": "Response Getv1Get Specific Credential By Id"
++                  "$ref": "#/components/schemas/CredentialsMetaResponse"
+                 }
+               }
+             }
+@@ -9629,7 +9595,7 @@
+         "type": "object",
+         "title": "HTTPValidationError"
+       },
+-      "HostScopedCredentials-Input": {
++      "HostScopedCredentials": {
+         "properties": {
+           "id": { "type": "string", "title": "Id" },
+           "provider": { "type": "string", "title": "Provider" },
+@@ -9663,36 +9629,6 @@
+         "required": ["provider", "host"],
+         "title": "HostScopedCredentials"
+       },
+-      "HostScopedCredentials-Output": {
+-        "properties": {
+-          "id": { "type": "string", "title": "Id" },
+-          "provider": { "type": "string", "title": "Provider" },
+-          "title": {
+-            "anyOf": [{ "type": "string" }, { "type": "null" }],
+-            "title": "Title"
+-          },
+-          "type": {
+-            "type": "string",
+-            "const": "host_scoped",
+-            "title": "Type",
+-            "default": "host_scoped"
+-          },
+-          "host": {
+-            "type": "string",
+-            "title": "Host",
+-            "description": "The host/URI pattern to match against request URLs"
+-          },
+-          "headers": {
+-            "additionalProperties": { "type": "string" },
+-            "type": "object",
+-            "title": "Headers",
+-            "description": "Key-value header map to add to matching requests"
+-          }
+-        },
+-        "type": "object",
+-        "required": ["provider", "host"],
+-        "title": "HostScopedCredentials"
+-      },
+       "ImageURLResponse": {
+         "properties": {
+           "image_url": { "type": "string", "title": "Image Url" }

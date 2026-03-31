@@ -1,0 +1,12 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_a0f37ae0",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "ca05f09f304090ff8e574a0696d5124d0e62cd95",
+  "solution_commit": "a0f37ae0091a1f799df5db07b030706503104de4",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "client/src/templates/Challenges/components/speaking-modal.tsx",
+    "e2e/multiple-choice-question-challenge.spec.ts"
+  ]
+}

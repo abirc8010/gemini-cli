@@ -1,0 +1,30 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_93810570",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "f21a36ca37094cd408d4137962767f1d030653f8",
+  "solution_commit": "93810570796ce26d49fb6f525421ee9d99cc5aea",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/blocks/smart_decision_maker.py",
+    "autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker.py",
+    "autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dict.py",
+    "autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dynamic_fields.py",
+    "autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_responses_api.py",
+    "autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md",
+    "autogpt_platform/backend/backend/copilot/tools/agent_generator/fixer.py",
+    "autogpt_platform/backend/backend/copilot/tools/agent_generator/helpers.py",
+    "autogpt_platform/backend/backend/copilot/tools/agent_generator/validator.py",
+    "autogpt_platform/backend/backend/copilot/tools/find_block.py",
+    "autogpt_platform/backend/backend/copilot/tools/find_block_test.py",
+    "autogpt_platform/backend/backend/copilot/tools/run_block_test.py",
+    "autogpt_platform/backend/backend/data/block_cost_config.py",
+    "autogpt_platform/backend/backend/data/execution_outputs_test.py",
+    "autogpt_platform/backend/backend/data/graph.py",
+    "autogpt_platform/backend/backend/util/prompt_test.py",
+    "autogpt_platform/backend/test/agent_generator/test_smart_decision_maker.py",
+    "autogpt_platform/frontend/src/lib/autogpt-server-api/types.ts",
+    "docs/integrations/README.md",
+    "docs/integrations/block-integrations/llm.md"
+  ]
+}

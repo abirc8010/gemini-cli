@@ -1,0 +1,14 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_0076ad2a",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "0f67e45d05c855077236f739ca3a02fa95fc7e96",
+  "solution_commit": "0076ad2a1a4de990e02f6af9832c1b893697b971",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/blocks/stagehand/blocks.py",
+    "autogpt_platform/backend/poetry.lock",
+    "autogpt_platform/backend/pyproject.toml",
+    "docs/integrations/block-integrations/stagehand/blocks.md"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_1a884b74",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "54af69349ebe823f02f9c25da509603d73c8e3fa",
+  "solution_commit": "1a884b745a7a9bbbd33bec581ce614b4ed94fbf4",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "curriculum/challenges/english/blocks/lecture-booleans-and-conditionals/67fe85a3db9bad35f2b6a2bd.md",
+    "curriculum/challenges/english/blocks/lecture-understanding-error-handling/688c8ef26f3cad09f36b95b9.md",
+    "curriculum/challenges/english/blocks/review-error-handling/67f39bcb48373420f4f12d62.md",
+    "curriculum/challenges/english/blocks/review-python-basics/67f39b40deaec81a3e40e0c5.md",
+    "curriculum/challenges/english/blocks/review-python/67f39e391c9b373069def02c.md"
+  ]
+}

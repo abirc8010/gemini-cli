@@ -1,0 +1,13 @@
+{
+  "task_id": "yt-dlp_yt-dlp_23b84650",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "d20f58d721fe45fe873e3389a0d17a72352aecec",
+  "solution_commit": "23b846506378a6a9c9a0958382d37f943f7cfa51",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "README.md",
+    "yt_dlp/extractor/youtube/_base.py",
+    "yt_dlp/extractor/youtube/_video.py"
+  ]
+}

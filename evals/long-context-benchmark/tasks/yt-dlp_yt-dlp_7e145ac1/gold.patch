@@ -1,0 +1,33 @@
+diff --git a/README.md b/README.md
+index a5b649818..27a54ef68 100644
+--- a/README.md
++++ b/README.md
+@@ -1880,7 +1880,7 @@ #### youtube
+ * `pot_trace`: Enable debug logging for PO Token fetching. Either `true` or `false` (default)
+ * `fetch_pot`: Policy to use for fetching a PO Token from providers. One of `always` (always try fetch a PO Token regardless if the client requires one for the given context), `never` (never fetch a PO Token), or `auto` (default; only fetch a PO Token if the client requires one for the given context)
+ * `jsc_trace`: Enable debug logging for JS Challenge fetching. Either `true` or `false` (default)
+-* `use_ad_playback_context`: Skip preroll ads to eliminate the mandatory wait period before download. Do NOT use this when passing premium account cookies to yt-dlp, as it will result in a loss of premium formats. Only effective with the `web`, `web_safari`, `web_music` and `mweb` player clients. Either `true` or `false` (default)
++* `use_ad_playback_context`: Skip preroll ads to eliminate the mandatory wait period before download. Do NOT use this when passing premium account cookies to yt-dlp, as it will result in a loss of premium formats. Only effective with the `mweb` and `web_music` player clients. Either `true` or `false` (default)
+ 
+ #### youtube-ejs
+ * `jitless`: Run supported Javascript engines in JIT-less mode. Supported runtimes are `deno`, `node` and `bun`. Provides better security at the cost of performance/speed. Do note that `node` and `bun` are still considered insecure. Either `true` or `false` (default)
+diff --git a/yt_dlp/extractor/youtube/_base.py b/yt_dlp/extractor/youtube/_base.py
+index 776e95498..a3ae1599d 100644
+--- a/yt_dlp/extractor/youtube/_base.py
++++ b/yt_dlp/extractor/youtube/_base.py
+@@ -104,7 +104,6 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 1,
+         'SUPPORTS_COOKIES': True,
+-        'SUPPORTS_AD_PLAYBACK_CONTEXT': True,
+         **WEB_PO_TOKEN_POLICIES,
+     },
+     # Safari UA returns pre-merged video+audio 144p/240p/360p/720p/1080p HLS formats
+@@ -118,7 +117,6 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 1,
+         'SUPPORTS_COOKIES': True,
+-        'SUPPORTS_AD_PLAYBACK_CONTEXT': True,
+         **WEB_PO_TOKEN_POLICIES,
+     },
+     'web_embedded': {

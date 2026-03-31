@@ -1,0 +1,12 @@
+{
+  "task_id": "yt-dlp_yt-dlp_e2ea6bd6",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "ede54330fb38866936c63ebb96c490a2d4b1b58c",
+  "solution_commit": "e2ea6bd6ab639f910b99e55add18856974ff4c3a",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "yt_dlp/extractor/_extractors.py",
+    "yt_dlp/extractor/extractors.py"
+  ]
+}

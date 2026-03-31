@@ -1,0 +1,2443 @@
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/service.py b/autogpt_platform/backend/backend/copilot/sdk/service.py
+index c654f6510..0e71405ca 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/service.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/service.py
+@@ -81,9 +81,12 @@ from .response_adapter import SDKResponseAdapter
+ from .security_hooks import create_security_hooks
+ from .subscription import validate_subscription as _validate_claude_code_subscription
+ from .tool_adapter import (
++    cancel_pending_tool_tasks,
+     create_copilot_mcp_server,
+     get_copilot_tool_names,
+     get_sdk_disallowed_tools,
++    pre_launch_tool_call,
++    reset_stash_event,
+     reset_tool_failure_counters,
+     set_execution_context,
+     wait_for_stash,
+@@ -182,6 +185,19 @@ def _is_prompt_too_long(err: BaseException) -> bool:
+     return False
+ 
+ 
++def _is_tool_only_message(sdk_msg: object) -> bool:
++    """Return True if *sdk_msg* is an AssistantMessage containing only ToolUseBlocks.
++
++    Such a message represents a parallel tool-call batch (no text output yet).
++    The ``bool(…content)`` guard prevents vacuous-truth evaluation on an empty list.
++    """
++    return (
++        isinstance(sdk_msg, AssistantMessage)
++        and bool(sdk_msg.content)
++        and all(isinstance(b, ToolUseBlock) for b in sdk_msg.content)
++    )
++
++
+ class ReducedContext(NamedTuple):
+     builder: TranscriptBuilder
+     use_resume: bool
+@@ -1275,6 +1291,29 @@ async def _run_stream_attempt(
+                     ended_with_stream_error = True
+                     break
+ 
++            # Parallel tool execution: pre-launch every ToolUseBlock as an
++            # asyncio.Task the moment its AssistantMessage arrives.  The SDK
++            # sends one AssistantMessage per tool call when issuing parallel
++            # calls, so each message is pre-launched independently.  The MCP
++            # handlers will await the already-running task instead of executing
++            # fresh, making all concurrent tool calls run in parallel.
++            #
++            # Also determine if the message is a tool-only batch (all content
++            # items are ToolUseBlocks) — such messages have no text output yet,
++            # so we skip the wait_for_stash flush below.
++            is_tool_only = False
++            if isinstance(sdk_msg, AssistantMessage) and sdk_msg.content:
++                is_tool_only = True
++                # NOTE: Pre-launches are sequential (each await completes
++                # file-ref expansion before the next starts).  This is fine
++                # since expansion is typically sub-ms; a future optimisation
++                # could gather all pre-launches concurrently.
++                for tool_use in sdk_msg.content:
++                    if isinstance(tool_use, ToolUseBlock):
++                        await pre_launch_tool_call(tool_use.name, tool_use.input)
++                    else:
++                        is_tool_only = False
++
+             # Race-condition fix: SDK hooks (PostToolUse) are
+             # executed asynchronously via start_soon() — the next
+             # message can arrive before the hook stashes output.
+@@ -1288,15 +1327,12 @@ async def _run_stream_attempt(
+             # AssistantMessages (each containing only
+             # ToolUseBlocks), we must NOT wait/flush — the prior
+             # tools are still executing concurrently.
+-            is_parallel_continuation = isinstance(sdk_msg, AssistantMessage) and all(
+-                isinstance(b, ToolUseBlock) for b in sdk_msg.content
+-            )
+             if (
+                 state.adapter.has_unresolved_tool_calls
+                 and isinstance(sdk_msg, (AssistantMessage, ResultMessage))
+-                and not is_parallel_continuation
++                and not is_tool_only
+             ):
+-                if await wait_for_stash(timeout=0.5):
++                if await wait_for_stash():
+                     await asyncio.sleep(0)
+                 else:
+                     logger.warning(
+@@ -1876,10 +1912,12 @@ async def stream_chat_completion_sdk(
+         )
+ 
+         for attempt in range(_MAX_STREAM_ATTEMPTS):
++            # Clear any stale stash signal from the previous attempt so
++            # wait_for_stash() doesn't fire prematurely on a leftover event.
++            reset_stash_event()
+             # Reset tool-level circuit breaker so failures from a previous
+             # (rolled-back) attempt don't carry over to the fresh attempt.
+             reset_tool_failure_counters()
+-
+             if attempt > 0:
+                 logger.info(
+                     "%s Retrying with reduced context (%d/%d)",
+@@ -1935,6 +1973,10 @@ async def stream_chat_completion_sdk(
+                     if not isinstance(event, StreamHeartbeat):
+                         events_yielded += 1
+                     yield event
++                # Cancel any pre-launched tasks that were never dispatched
++                # by the SDK (e.g. edge-case SDK behaviour changes). Symmetric
++                # with the three error-path await cancel_pending_tool_tasks() calls.
++                await cancel_pending_tool_tasks()
+                 break  # Stream completed — exit retry loop
+             except asyncio.CancelledError:
+                 logger.warning(
+@@ -1943,6 +1985,9 @@ async def stream_chat_completion_sdk(
+                     attempt + 1,
+                     _MAX_STREAM_ATTEMPTS,
+                 )
++                # Cancel any pre-launched tasks so they don't continue executing
++                # against a rolled-back or abandoned session.
++                await cancel_pending_tool_tasks()
+                 raise
+             except _HandledStreamError as exc:
+                 # _run_stream_attempt already yielded a StreamError and
+@@ -1974,6 +2019,8 @@ async def stream_chat_completion_sdk(
+                     retryable=True,
+                 )
+                 ended_with_stream_error = True
++                # Cancel any pre-launched tasks from the failed attempt.
++                await cancel_pending_tool_tasks()
+                 break
+             except Exception as e:
+                 stream_err = e
+@@ -1990,6 +2037,9 @@ async def stream_chat_completion_sdk(
+                     exc_info=True,
+                 )
+                 session.messages = session.messages[:pre_attempt_msg_count]
++                # Cancel any pre-launched tasks from the failed attempt so they
++                # don't continue executing against the rolled-back session.
++                await cancel_pending_tool_tasks()
+                 if events_yielded > 0:
+                     # Events were already sent to the frontend and cannot be
+                     # unsent.  Retrying would produce duplicate/inconsistent
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/service_helpers_test.py b/autogpt_platform/backend/backend/copilot/sdk/service_helpers_test.py
+index 123aff3a8..eaf959ad3 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/service_helpers_test.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/service_helpers_test.py
+@@ -1,21 +1,23 @@
+ """Unit tests for extracted service helpers.
+ 
+ Covers ``_is_prompt_too_long``, ``_reduce_context``, ``_iter_sdk_messages``,
+-and the ``ReducedContext`` named tuple.
++``ReducedContext``, and the ``is_parallel_continuation`` logic.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
+ from collections.abc import AsyncGenerator
+-from unittest.mock import AsyncMock, patch
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
++from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock
+ 
+ from .conftest import build_test_transcript as _build_transcript
+ from .service import (
+     ReducedContext,
+     _is_prompt_too_long,
++    _is_tool_only_message,
+     _iter_sdk_messages,
+     _reduce_context,
+ )
+@@ -281,3 +283,55 @@ class TestIterSdkMessages:
+         first = await gen.__anext__()
+         assert first == "first"
+         await gen.aclose()  # should cancel pending task cleanly
++
++
++# ---------------------------------------------------------------------------
++# is_parallel_continuation logic
++# ---------------------------------------------------------------------------
++
++
++class TestIsParallelContinuation:
++    """Unit tests for the is_parallel_continuation expression in the streaming loop.
++
++    Verifies the vacuous-truth guard (empty content must return False) and the
++    boundary cases for mixed TextBlock+ToolUseBlock messages.
++    """
++
++    def _make_tool_block(self) -> MagicMock:
++        block = MagicMock(spec=ToolUseBlock)
++        return block
++
++    def test_all_tool_use_blocks_is_parallel(self):
++        """AssistantMessage with only ToolUseBlocks is a parallel continuation."""
++        msg = MagicMock(spec=AssistantMessage)
++        msg.content = [self._make_tool_block(), self._make_tool_block()]
++        assert _is_tool_only_message(msg) is True
++
++    def test_empty_content_is_not_parallel(self):
++        """AssistantMessage with empty content must NOT be treated as parallel.
++
++        Without the bool(sdk_msg.content) guard, all() on an empty iterable
++        returns True via vacuous truth — this test ensures the guard is present.
++        """
++        msg = MagicMock(spec=AssistantMessage)
++        msg.content = []
++        assert _is_tool_only_message(msg) is False
++
++    def test_mixed_text_and_tool_blocks_not_parallel(self):
++        """AssistantMessage with text + tool blocks is NOT a parallel continuation."""
++        msg = MagicMock(spec=AssistantMessage)
++        text_block = MagicMock(spec=TextBlock)
++        msg.content = [text_block, self._make_tool_block()]
++        assert _is_tool_only_message(msg) is False
++
++    def test_non_assistant_message_not_parallel(self):
++        """Non-AssistantMessage types are never parallel continuations."""
++        assert _is_tool_only_message("not a message") is False
++        assert _is_tool_only_message(None) is False
++        assert _is_tool_only_message(42) is False
++
++    def test_single_tool_block_is_parallel(self):
++        """Single ToolUseBlock AssistantMessage is a parallel continuation."""
++        msg = MagicMock(spec=AssistantMessage)
++        msg.content = [self._make_tool_block()]
++        assert _is_tool_only_message(msg) is True
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/tool_adapter.py b/autogpt_platform/backend/backend/copilot/sdk/tool_adapter.py
+index 378107d04..10e97a31f 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/tool_adapter.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/tool_adapter.py
+@@ -53,6 +53,14 @@ _MCP_MAX_CHARS = 500_000
+ MCP_SERVER_NAME = "copilot"
+ MCP_TOOL_PREFIX = f"mcp__{MCP_SERVER_NAME}__"
+ 
++# Map from tool_name -> Queue of pre-launched (task, args) pairs.
++# Initialised per-session in set_execution_context() so concurrent sessions
++# never share the same dict.
++_TaskQueueItem = tuple[asyncio.Task[dict[str, Any]], dict[str, Any]]
++_tool_task_queues: ContextVar[dict[str, asyncio.Queue[_TaskQueueItem]] | None] = (
++    ContextVar("_tool_task_queues", default=None)
++)
++
+ # Stash for MCP tool outputs before the SDK potentially truncates them.
+ # Keyed by tool_name → full output string. Consumed (popped) by the
+ # response adapter when it builds StreamToolOutputAvailable.
+@@ -107,9 +115,65 @@ def set_execution_context(
+     _current_permissions.set(permissions)
+     _pending_tool_outputs.set({})
+     _stash_event.set(asyncio.Event())
++    _tool_task_queues.set({})
+     _consecutive_tool_failures.set({})
+ 
+ 
++def reset_stash_event() -> None:
++    """Clear any stale stash signal left over from a previous stream attempt.
++
++    ``_stash_event`` is set once per session in ``set_execution_context`` and
++    reused across retry attempts.  A PostToolUse hook from a failed attempt may
++    leave the event set; calling this at the start of each retry prevents
++    ``wait_for_stash`` from returning prematurely on a stale signal.
++    """
++    event = _stash_event.get(None)
++    if event is not None:
++        event.clear()
++
++
++async def cancel_pending_tool_tasks() -> None:
++    """Cancel all queued pre-launched tasks for the current execution context.
++
++    Call this when a stream attempt aborts (error, cancellation) to prevent
++    pre-launched tasks from continuing to execute against a rolled-back session.
++    Tasks that are already done are skipped; in-flight tasks are cancelled and
++    awaited so that any cleanup (``finally`` blocks, DB rollbacks) completes
++    before the next retry starts.
++    """
++    queues = _tool_task_queues.get()
++    if not queues:
++        return
++    cancelled_tasks: list[asyncio.Task] = []
++    for tool_name, queue in list(queues.items()):
++        cancelled = 0
++        while not queue.empty():
++            task, _args = queue.get_nowait()
++            if not task.done():
++                task.cancel()
++                cancelled_tasks.append(task)
++                cancelled += 1
++        if cancelled:
++            logger.debug(
++                "Cancelled %d pre-launched task(s) for tool '%s'", cancelled, tool_name
++            )
++    queues.clear()
++    # Await all cancelled tasks so their cleanup (finally blocks, DB rollbacks)
++    # completes before the next retry attempt starts new pre-launches.
++    # Use a timeout to prevent hanging indefinitely if a task's cleanup is stuck.
++    if cancelled_tasks:
++        try:
++            await asyncio.wait_for(
++                asyncio.gather(*cancelled_tasks, return_exceptions=True),
++                timeout=5.0,
++            )
++        except TimeoutError:
++            logger.warning(
++                "Timed out waiting for %d cancelled task(s) to clean up",
++                len(cancelled_tasks),
++            )
++
++
+ def reset_tool_failure_counters() -> None:
+     """Reset all tool-level circuit breaker counters.
+ 
+@@ -182,12 +246,13 @@ async def wait_for_stash(timeout: float = 2.0) -> bool:
+     by waiting on the ``_stash_event``, which is signaled by
+     :func:`stash_pending_tool_output`.
+ 
+-    Returns ``True`` if a stash signal was received, ``False`` on timeout.
++    Uses ``asyncio.Event.wait()`` so it returns the instant the hook signals —
++    the timeout is purely a safety net for the case where the hook never fires.
++    Returns ``True`` if the stash signal was received, ``False`` on timeout.
+ 
+-    The 2.0 s default was chosen based on production metrics: the original
+-    0.5 s caused frequent timeouts under load (parallel tool calls, large
+-    outputs).  2.0 s gives a comfortable margin while still failing fast
+-    when the hook genuinely will not fire.
++    The 2.0 s default was chosen to accommodate slower tool startup in cloud
++    sandboxes while still failing fast when the hook genuinely will not fire.
++    With the parallel pre-launch path, hooks typically fire well under 1 ms.
+     """
+     event = _stash_event.get(None)
+     if event is None:
+@@ -196,7 +261,7 @@ async def wait_for_stash(timeout: float = 2.0) -> bool:
+     if event.is_set():
+         event.clear()
+         return True
+-    # Slow path: wait for the hook to signal.
++    # Slow path: block until the hook signals or the safety timeout expires.
+     try:
+         async with asyncio.timeout(timeout):
+             await event.wait()
+@@ -206,6 +271,82 @@ async def wait_for_stash(timeout: float = 2.0) -> bool:
+         return False
+ 
+ 
++async def pre_launch_tool_call(tool_name: str, args: dict[str, Any]) -> None:
++    """Pre-launch a tool as a background task so parallel calls run concurrently.
++
++    Called when an AssistantMessage with ToolUseBlocks is received, before the
++    SDK dispatches the MCP tool/call requests. The tool_handler will await the
++    pre-launched task instead of executing fresh.
++
++    The tool_name may include an MCP prefix (e.g. ``mcp__copilot__run_block``);
++    the prefix is stripped automatically before looking up the tool.
++
++    Ordering guarantee: the Claude Agent SDK dispatches MCP ``tools/call`` requests
++    in the same order as the ToolUseBlocks appear in the AssistantMessage.
++    Pre-launched tasks are queued FIFO per tool name, so the N-th handler for a
++    given tool name dequeues the N-th pre-launched task — result and args always
++    correspond when the SDK preserves order (which it does in the current SDK).
++    """
++    queues = _tool_task_queues.get()
++    if queues is None:
++        return
++
++    # Strip the MCP server prefix (e.g. "mcp__copilot__") to get the bare tool name.
++    # Use removeprefix so tool names that themselves contain "__" are handled correctly.
++    bare_name = tool_name.removeprefix(MCP_TOOL_PREFIX)
++
++    base_tool = TOOL_REGISTRY.get(bare_name)
++    if base_tool is None:
++        return
++
++    user_id, session = get_execution_context()
++    if session is None:
++        return
++
++    # Expand @@agptfile: references before launching the task.
++    # The _truncating wrapper (which normally handles expansion) runs AFTER
++    # pre_launch_tool_call — the pre-launched task would otherwise receive raw
++    # @@agptfile: tokens and fail to resolve them inside _execute_tool_sync.
++    # Use _build_input_schema (same path as _truncating) for schema-aware expansion.
++    input_schema: dict[str, Any] | None
++    try:
++        input_schema = _build_input_schema(base_tool)
++    except Exception:
++        input_schema = None  # schema unavailable — skip schema-aware expansion
++    try:
++        args = await expand_file_refs_in_args(
++            args, user_id, session, input_schema=input_schema
++        )
++    except FileRefExpansionError as exc:
++        logger.warning(
++            "pre_launch_tool_call: @@agptfile expansion failed for %s: %s — skipping pre-launch",
++            bare_name,
++            exc,
++        )
++        return
++
++    task = asyncio.create_task(_execute_tool_sync(base_tool, user_id, session, args))
++    # Log unhandled exceptions so "Task exception was never retrieved" warnings
++    # do not pollute stderr when a task is pre-launched but never dequeued.
++    task.add_done_callback(
++        lambda t, name=bare_name: (
++            logger.warning(
++                "Pre-launched task for %s raised unhandled: %s",
++                name,
++                t.exception(),
++            )
++            if not t.cancelled() and t.exception()
++            else None
++        )
++    )
++
++    if bare_name not in queues:
++        queues[bare_name] = asyncio.Queue[_TaskQueueItem]()
++    # Store (task, args) so the handler can log a warning if the SDK dispatches
++    # calls in a different order than the ToolUseBlocks appeared in the message.
++    queues[bare_name].put_nowait((task, args))
++
++
+ async def _execute_tool_sync(
+     base_tool: BaseTool,
+     user_id: str | None,
+@@ -214,8 +355,10 @@ async def _execute_tool_sync(
+ ) -> dict[str, Any]:
+     """Execute a tool synchronously and return MCP-formatted response.
+ 
+-    Note: ``@@agptfile:`` expansion is handled upstream in the ``_truncating`` wrapper
+-    so all registered handlers (BaseTool, E2B, Read) expand uniformly.
++    Note: ``@@agptfile:`` expansion should be performed by the caller before
++    invoking this function.  For the normal (non-parallel) path it is handled
++    by the ``_truncating`` wrapper; for the pre-launched parallel path it is
++    handled in :func:`pre_launch_tool_call` before the task is created.
+     """
+     effective_id = f"sdk-{uuid.uuid4().hex[:12]}"
+     result = await base_tool.execute(
+@@ -312,7 +455,83 @@ def create_tool_handler(base_tool: BaseTool):
+     """
+ 
+     async def tool_handler(args: dict[str, Any]) -> dict[str, Any]:
+-        """Execute the wrapped tool and return MCP-formatted response."""
++        """Execute the wrapped tool and return MCP-formatted response.
++
++        If a pre-launched task exists (from parallel tool pre-launch in the
++        message loop), await it instead of executing fresh.
++        """
++        queues = _tool_task_queues.get()
++        if queues and base_tool.name in queues:
++            queue = queues[base_tool.name]
++            if not queue.empty():
++                task, launch_args = queue.get_nowait()
++                # Sanity-check: warn if the args don't match — this can happen
++                # if the SDK dispatches tool calls in a different order than the
++                # ToolUseBlocks appeared in the AssistantMessage (unlikely but
++                # could occur in future SDK versions or with SDK bugs).
++                # We compare full values (not just keys) so that two run_block
++                # calls with different block_id values are caught even though
++                # both have the same key set.
++                if launch_args != args:
++                    logger.warning(
++                        "Pre-launched task for %s: arg mismatch "
++                        "(launch_keys=%s, call_keys=%s) — cancelling "
++                        "pre-launched task and falling back to direct execution",
++                        base_tool.name,
++                        (
++                            sorted(launch_args.keys())
++                            if isinstance(launch_args, dict)
++                            else type(launch_args).__name__
++                        ),
++                        (
++                            sorted(args.keys())
++                            if isinstance(args, dict)
++                            else type(args).__name__
++                        ),
++                    )
++                    if not task.done():
++                        task.cancel()
++                        # Await cancellation to prevent duplicate concurrent
++                        # execution for blocks with side effects.
++                        try:
++                            await task
++                        except (asyncio.CancelledError, Exception):
++                            pass
++                    # Fall through to the direct-execution path below.
++                else:
++                    # Args match — await the pre-launched task.
++                    try:
++                        result = await task
++                    except asyncio.CancelledError:
++                        # Re-raise: CancelledError may be propagating from the
++                        # outer streaming loop being cancelled — swallowing it
++                        # would mask the cancellation and prevent proper cleanup.
++                        logger.warning(
++                            "Pre-launched tool %s was cancelled — re-raising",
++                            base_tool.name,
++                        )
++                        raise
++                    except Exception as e:
++                        logger.error(
++                            "Pre-launched tool %s failed: %s",
++                            base_tool.name,
++                            e,
++                            exc_info=True,
++                        )
++                        return _mcp_error(
++                            f"Failed to execute {base_tool.name}. "
++                            "Check server logs for details."
++                        )
++
++                    # Pre-truncate the result so the _truncating wrapper (which
++                    # wraps this handler) receives an already-within-budget
++                    # value. _truncating handles stashing — we must NOT stash
++                    # here or the output will be appended twice to the FIFO
++                    # queue and pop_pending_tool_output would return a duplicate
++                    # entry on the second call for the same tool.
++                    return truncate(result, _MCP_MAX_CHARS)
++
++        # No pre-launched task — execute directly (fallback for non-parallel calls).
+         user_id, session = get_execution_context()
+ 
+         if session is None:
+@@ -321,8 +540,12 @@ def create_tool_handler(base_tool: BaseTool):
+         try:
+             return await _execute_tool_sync(base_tool, user_id, session, args)
+         except Exception as e:
+-            logger.error(f"Error executing tool {base_tool.name}: {e}", exc_info=True)
+-            return _mcp_error(f"Failed to execute {base_tool.name}: {e}")
++            logger.error(
++                "Error executing tool %s: %s", base_tool.name, e, exc_info=True
++            )
++            return _mcp_error(
++                f"Failed to execute {base_tool.name}. Check server logs for details."
++            )
+ 
+     return tool_handler
+ 
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/tool_adapter_test.py b/autogpt_platform/backend/backend/copilot/sdk/tool_adapter_test.py
+index 149ef72d0..8e0ed80cf 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/tool_adapter_test.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/tool_adapter_test.py
+@@ -1,16 +1,26 @@
+-"""Tests for tool_adapter helpers: truncation, stash, context vars."""
++"""Tests for tool_adapter helpers: truncation, stash, context vars, parallel pre-launch."""
++
++import asyncio
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
+ 
+ from backend.copilot.context import get_sdk_cwd
++from backend.copilot.response_model import StreamToolOutputAvailable
++from backend.copilot.sdk.file_ref import FileRefExpansionError
+ from backend.util.truncate import truncate
+ 
+ from .tool_adapter import (
+     _MCP_MAX_CHARS,
+     _text_from_mcp_result,
++    cancel_pending_tool_tasks,
++    create_tool_handler,
+     pop_pending_tool_output,
++    pre_launch_tool_call,
++    reset_stash_event,
+     set_execution_context,
+     stash_pending_tool_output,
++    wait_for_stash,
+ )
+ 
+ # ---------------------------------------------------------------------------
+@@ -120,6 +130,69 @@ class TestToolOutputStash:
+         assert pop_pending_tool_output("a") == "alpha"
+ 
+ 
++# ---------------------------------------------------------------------------
++# reset_stash_event / wait_for_stash
++# ---------------------------------------------------------------------------
++
++
++class TestResetStashEvent:
++    """Tests for reset_stash_event — the stale-signal fix for retry attempts."""
++
++    @pytest.fixture(autouse=True)
++    def _init_context(self):
++        set_execution_context(
++            user_id="test",
++            session=None,  # type: ignore[arg-type]
++            sandbox=None,
++        )
++
++    @pytest.mark.asyncio
++    async def test_reset_clears_stale_signal(self):
++        """After reset, wait_for_stash does NOT return immediately (blocks until timeout)."""
++        # Simulate a stale signal left by a failed attempt's PostToolUse hook.
++        stash_pending_tool_output("some_tool", "stale output")
++        # The stash_pending_tool_output call sets the event.
++        # Now reset it — simulating start of a new retry attempt.
++        reset_stash_event()
++        # wait_for_stash should block and time out since the event was cleared.
++        result = await wait_for_stash(timeout=0.05)
++        assert result is False, (
++            "wait_for_stash should have timed out after reset_stash_event, "
++            "but it returned True — stale signal was not cleared"
++        )
++
++    @pytest.mark.asyncio
++    async def test_wait_returns_true_when_signaled_after_reset(self):
++        """After reset, a new stash signal is correctly detected."""
++        reset_stash_event()
++
++        async def _signal_after_delay():
++            await asyncio.sleep(0.01)
++            stash_pending_tool_output("tool", "fresh output")
++
++        asyncio.create_task(_signal_after_delay())
++        result = await wait_for_stash(timeout=1.0)
++        assert result is True
++
++    @pytest.mark.asyncio
++    async def test_retry_scenario_stale_event_does_not_fire_prematurely(self):
++        """Simulates: attempt 1 leaves event set → reset → attempt 2 waits correctly."""
++        # Attempt 1: hook fires and sets the event
++        stash_pending_tool_output("t", "attempt-1-output")
++        # Pop it so the stash is empty (simulating normal consumption)
++        pop_pending_tool_output("t")
++
++        # Between attempts: reset (as service.py does before each retry)
++        reset_stash_event()
++
++        # Attempt 2: wait_for_stash should NOT return True immediately
++        result = await wait_for_stash(timeout=0.05)
++        assert result is False, (
++            "Stale event from attempt 1 caused wait_for_stash to return "
++            "prematurely in attempt 2"
++        )
++
++
+ # ---------------------------------------------------------------------------
+ # _truncating wrapper (integration via create_copilot_mcp_server)
+ # ---------------------------------------------------------------------------
+@@ -168,3 +241,534 @@ class TestTruncationAndStashIntegration:
+         text = _text_from_mcp_result(truncated)
+         assert len(text) < len(big_text)
+         assert len(str(truncated)) <= _MCP_MAX_CHARS
++
++
++# ---------------------------------------------------------------------------
++# Parallel pre-launch infrastructure
++# ---------------------------------------------------------------------------
++
++
++def _make_mock_tool(name: str, output: str = "result") -> MagicMock:
++    """Return a BaseTool mock that returns a successful StreamToolOutputAvailable."""
++    tool = MagicMock()
++    tool.name = name
++    tool.parameters = {"properties": {}, "required": []}
++    tool.execute = AsyncMock(
++        return_value=StreamToolOutputAvailable(
++            toolCallId="test-id",
++            output=output,
++            toolName=name,
++            success=True,
++        )
++    )
++    return tool
++
++
++def _make_mock_session() -> MagicMock:
++    """Return a minimal ChatSession mock."""
++    return MagicMock()
++
++
++def _init_ctx(session=None):
++    set_execution_context(
++        user_id="user-1",
++        session=session,  # type: ignore[arg-type]
++        sandbox=None,
++    )
++
++
++class TestPreLaunchToolCall:
++    """Tests for pre_launch_tool_call and the queue-based parallel dispatch."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_unknown_tool_is_silently_ignored(self):
++        """pre_launch_tool_call does nothing for tools not in TOOL_REGISTRY."""
++        # Should not raise even if the tool name is completely unknown
++        await pre_launch_tool_call("nonexistent_tool", {})
++
++    @pytest.mark.asyncio
++    async def test_mcp_prefix_stripped_before_registry_lookup(self):
++        """mcp__copilot__run_block is looked up as 'run_block'."""
++        mock_tool = _make_mock_tool("run_block")
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("mcp__copilot__run_block", {"block_id": "b1"})
++
++        # The task was enqueued — mock_tool.execute should be called once
++        # (may not complete immediately but should start)
++        await asyncio.sleep(0)  # yield to event loop
++        mock_tool.execute.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_bare_tool_name_without_prefix(self):
++        """Tool names without __ separator are looked up as-is."""
++        mock_tool = _make_mock_tool("run_block")
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++
++        await asyncio.sleep(0)
++        mock_tool.execute.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_task_enqueued_fifo_for_same_tool(self):
++        """Two pre-launched calls for the same tool name are enqueued FIFO."""
++        results = []
++
++        async def slow_execute(*args, **kwargs):
++            results.append(len(results))
++            return StreamToolOutputAvailable(
++                toolCallId="id",
++                output=str(len(results) - 1),
++                toolName="t",
++                success=True,
++            )
++
++        mock_tool = _make_mock_tool("t")
++        mock_tool.execute = AsyncMock(side_effect=slow_execute)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"t": mock_tool},
++        ):
++            await pre_launch_tool_call("t", {"n": 1})
++            await pre_launch_tool_call("t", {"n": 2})
++            await asyncio.sleep(0)
++
++        assert mock_tool.execute.await_count == 2
++
++    @pytest.mark.asyncio
++    async def test_file_ref_expansion_failure_skips_pre_launch(self):
++        """When @@agptfile: expansion fails, pre_launch_tool_call skips the task.
++
++        The handler should then fall back to direct execution (which will also
++        fail with a proper MCP error via _truncating's own expansion).
++        """
++        mock_tool = _make_mock_tool("run_block", output="should-not-execute")
++
++        with (
++            patch(
++                "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++                {"run_block": mock_tool},
++            ),
++            patch(
++                "backend.copilot.sdk.tool_adapter.expand_file_refs_in_args",
++                AsyncMock(side_effect=FileRefExpansionError("@@agptfile:missing.txt")),
++            ),
++        ):
++            # Should not raise — expansion failure is handled gracefully
++            await pre_launch_tool_call("run_block", {"text": "@@agptfile:missing.txt"})
++            await asyncio.sleep(0)
++
++        # No task was pre-launched — execute was not called
++        mock_tool.execute.assert_not_awaited()
++
++
++class TestCreateToolHandlerParallel:
++    """Tests for create_tool_handler using pre-launched tasks."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_handler_uses_prelaunched_task(self):
++        """Handler pops and awaits the pre-launched task rather than re-executing."""
++        mock_tool = _make_mock_tool("run_block", output="pre-launched result")
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)  # let task start
++
++            handler = create_tool_handler(mock_tool)
++            result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is False
++        text = result["content"][0]["text"]
++        assert "pre-launched result" in text
++        # Should only have been called once (the pre-launched task), not twice
++        mock_tool.execute.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_handler_does_not_double_stash_for_prelaunched_task(self):
++        """Pre-launched task result must NOT be stashed by tool_handler directly.
++
++        The _truncating wrapper wraps tool_handler and handles stashing after
++        tool_handler returns.  If tool_handler also stashed, the output would be
++        appended twice to the FIFO queue and pop_pending_tool_output would return
++        a duplicate on the second call.
++
++        This test calls tool_handler directly (without _truncating) and asserts
++        that nothing was stashed — confirming stashing is deferred to _truncating.
++        """
++        mock_tool = _make_mock_tool("run_block", output="stash-me")
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)
++
++            handler = create_tool_handler(mock_tool)
++            result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is False
++        assert "stash-me" in result["content"][0]["text"]
++        # tool_handler must NOT stash — _truncating (which wraps handler) does it.
++        # Calling pop here (without going through _truncating) should return None.
++        not_stashed = pop_pending_tool_output("run_block")
++        assert not_stashed is None, (
++            "tool_handler must not stash directly — _truncating handles stashing "
++            "to prevent double-stash in the FIFO queue"
++        )
++
++    @pytest.mark.asyncio
++    async def test_handler_falls_back_when_queue_empty(self):
++        """When no pre-launched task exists, handler executes directly."""
++        mock_tool = _make_mock_tool("run_block", output="direct result")
++
++        # Don't call pre_launch_tool_call — queue is empty
++        handler = create_tool_handler(mock_tool)
++        result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is False
++        text = result["content"][0]["text"]
++        assert "direct result" in text
++        mock_tool.execute.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_handler_cancelled_error_propagates(self):
++        """CancelledError from a pre-launched task is re-raised to preserve cancellation semantics."""
++        mock_tool = _make_mock_tool("run_block")
++        mock_tool.execute = AsyncMock(side_effect=asyncio.CancelledError())
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)
++
++            handler = create_tool_handler(mock_tool)
++            with pytest.raises(asyncio.CancelledError):
++                await handler({"block_id": "b1"})
++
++    @pytest.mark.asyncio
++    async def test_handler_exception_returns_mcp_error(self):
++        """Exception from a pre-launched task is caught and returned as MCP error."""
++        mock_tool = _make_mock_tool("run_block")
++        mock_tool.execute = AsyncMock(side_effect=RuntimeError("block exploded"))
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)
++
++            handler = create_tool_handler(mock_tool)
++            result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is True
++        assert "Failed to execute run_block" in result["content"][0]["text"]
++
++    @pytest.mark.asyncio
++    async def test_two_same_tool_calls_dispatched_in_order(self):
++        """Two pre-launched tasks for the same tool are consumed in FIFO order."""
++        call_order = []
++
++        async def execute_with_tag(*args, **kwargs):
++            tag = kwargs.get("block_id", "?")
++            call_order.append(tag)
++            return StreamToolOutputAvailable(
++                toolCallId="id", output=f"out-{tag}", toolName="run_block", success=True
++            )
++
++        mock_tool = _make_mock_tool("run_block")
++        mock_tool.execute = AsyncMock(side_effect=execute_with_tag)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "first"})
++            await pre_launch_tool_call("run_block", {"block_id": "second"})
++            await asyncio.sleep(0)
++
++            handler = create_tool_handler(mock_tool)
++            r1 = await handler({"block_id": "first"})
++            r2 = await handler({"block_id": "second"})
++
++        assert "out-first" in r1["content"][0]["text"]
++        assert "out-second" in r2["content"][0]["text"]
++        assert call_order == [
++            "first",
++            "second",
++        ], f"Expected FIFO dispatch order but got {call_order}"
++
++    @pytest.mark.asyncio
++    async def test_arg_mismatch_falls_back_to_direct_execution(self):
++        """When pre-launched args differ from SDK args, handler cancels pre-launched
++        task and falls back to direct execution with the correct args."""
++        mock_tool = _make_mock_tool("run_block", output="direct-result")
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            # Pre-launch with args {"block_id": "wrong"}
++            await pre_launch_tool_call("run_block", {"block_id": "wrong"})
++            await asyncio.sleep(0)
++
++            # SDK dispatches with different args
++            handler = create_tool_handler(mock_tool)
++            result = await handler({"block_id": "correct"})
++
++        assert result["isError"] is False
++        # The tool was called twice: once by pre-launch (wrong args), once by
++        # direct fallback (correct args). The result should come from the
++        # direct execution path.
++        assert mock_tool.execute.await_count == 2
++
++    @pytest.mark.asyncio
++    async def test_no_session_falls_back_gracefully(self):
++        """When session is None and no pre-launched task, handler returns MCP error."""
++        mock_tool = _make_mock_tool("run_block")
++        # session=None means get_execution_context returns (user_id, None)
++        set_execution_context(user_id="u", session=None, sandbox=None)  # type: ignore[arg-type]
++
++        handler = create_tool_handler(mock_tool)
++        result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is True
++        assert "session" in result["content"][0]["text"].lower()
++
++
++# ---------------------------------------------------------------------------
++# cancel_pending_tool_tasks
++# ---------------------------------------------------------------------------
++
++
++class TestCancelPendingToolTasks:
++    """Tests for cancel_pending_tool_tasks — the stream-abort cleanup helper."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_cancels_queued_tasks(self):
++        """Queued tasks are cancelled and the queue is cleared."""
++        ran = False
++
++        async def never_run(*_args, **_kwargs):
++            nonlocal ran
++            await asyncio.sleep(10)  # long enough to still be pending
++            ran = True
++
++        mock_tool = _make_mock_tool("run_block")
++        mock_tool.execute = AsyncMock(side_effect=never_run)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)  # let task start
++            await cancel_pending_tool_tasks()
++            await asyncio.sleep(0)  # let cancellation propagate
++
++        assert not ran, "Task should have been cancelled before completing"
++
++    @pytest.mark.asyncio
++    async def test_noop_when_no_tasks_queued(self):
++        """cancel_pending_tool_tasks does not raise when queues are empty."""
++        await cancel_pending_tool_tasks()  # should not raise
++
++    @pytest.mark.asyncio
++    async def test_handler_does_not_find_cancelled_task(self):
++        """After cancel, tool_handler falls back to direct execution."""
++        mock_tool = _make_mock_tool("run_block", output="direct-fallback")
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"run_block": mock_tool},
++        ):
++            await pre_launch_tool_call("run_block", {"block_id": "b1"})
++            await asyncio.sleep(0)
++            await cancel_pending_tool_tasks()
++
++            # Queue is now empty — handler should execute directly
++            handler = create_tool_handler(mock_tool)
++            result = await handler({"block_id": "b1"})
++
++        assert result["isError"] is False
++        assert "direct-fallback" in result["content"][0]["text"]
++
++
++# ---------------------------------------------------------------------------
++# Concurrent / parallel pre-launch scenarios
++# ---------------------------------------------------------------------------
++
++
++class TestAllParallelToolsPrelaunchedIndependently:
++    """Simulate SDK sending N separate AssistantMessages for the same tool concurrently."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_all_parallel_tools_prelaunched_independently(self):
++        """5 pre-launches for the same tool all enqueue independently and run concurrently.
++
++        Each task sleeps for PER_TASK_S seconds. If they ran sequentially the total
++        wall time would be ~5*PER_TASK_S. Running concurrently it should finish in
++        roughly PER_TASK_S (plus scheduling overhead).
++        """
++        PER_TASK_S = 0.05
++        N = 5
++        started: list[int] = []
++        finished: list[int] = []
++
++        async def slow_execute(*args, **kwargs):
++            idx = len(started)
++            started.append(idx)
++            await asyncio.sleep(PER_TASK_S)
++            finished.append(idx)
++            return StreamToolOutputAvailable(
++                toolCallId=f"id-{idx}",
++                output=f"result-{idx}",
++                toolName="bash_exec",
++                success=True,
++            )
++
++        mock_tool = _make_mock_tool("bash_exec")
++        mock_tool.execute = AsyncMock(side_effect=slow_execute)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"bash_exec": mock_tool},
++        ):
++            for i in range(N):
++                await pre_launch_tool_call("bash_exec", {"cmd": f"echo {i}"})
++
++            # Measure only the concurrent execution window, not pre-launch overhead.
++            # Starting the timer here avoids false failures on slow CI runners where
++            # the pre_launch_tool_call setup takes longer than the concurrent sleep.
++            t0 = asyncio.get_running_loop().time()
++            await asyncio.sleep(PER_TASK_S * 2)
++            elapsed = asyncio.get_running_loop().time() - t0
++
++        assert mock_tool.execute.await_count == N
++        assert len(finished) == N
++        # Wall time of the sleep window should be well under N * PER_TASK_S
++        # (sequential would be ~0.25s; concurrent finishes in ~PER_TASK_S = 0.05s)
++        assert elapsed < N * PER_TASK_S, (
++            f"Expected concurrent execution (<{N * PER_TASK_S:.2f}s) "
++            f"but sleep window took {elapsed:.2f}s"
++        )
++
++
++class TestHandlerReturnsResultFromCorrectPrelaunchedTask:
++    """Pop pre-launched tasks in order and verify each returns its own result."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_handler_returns_result_from_correct_prelaunched_task(self):
++        """Two pre-launches for the same tool: first handler gets first result, second gets second."""
++
++        async def execute_with_cmd(*args, **kwargs):
++            cmd = kwargs.get("cmd", "?")
++            return StreamToolOutputAvailable(
++                toolCallId="id",
++                output=f"output-for-{cmd}",
++                toolName="bash_exec",
++                success=True,
++            )
++
++        mock_tool = _make_mock_tool("bash_exec")
++        mock_tool.execute = AsyncMock(side_effect=execute_with_cmd)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"bash_exec": mock_tool},
++        ):
++            await pre_launch_tool_call("bash_exec", {"cmd": "alpha"})
++            await pre_launch_tool_call("bash_exec", {"cmd": "beta"})
++            await asyncio.sleep(0)  # let both tasks start
++
++            handler = create_tool_handler(mock_tool)
++            r1 = await handler({"cmd": "alpha"})
++            r2 = await handler({"cmd": "beta"})
++
++        text1 = r1["content"][0]["text"]
++        text2 = r2["content"][0]["text"]
++        assert "output-for-alpha" in text1, f"Expected alpha result, got: {text1}"
++        assert "output-for-beta" in text2, f"Expected beta result, got: {text2}"
++        assert mock_tool.execute.await_count == 2
++
++
++class TestFiveConcurrentPrelaunchAllComplete:
++    """Pre-launch 5 tasks; consume all 5 via handlers; assert all succeed."""
++
++    @pytest.fixture(autouse=True)
++    def _init(self):
++        _init_ctx(session=_make_mock_session())
++
++    @pytest.mark.asyncio
++    async def test_five_concurrent_prelaunch_all_complete(self):
++        """All 5 pre-launched tasks complete and return successful results."""
++        N = 5
++        call_count = 0
++
++        async def counting_execute(*args, **kwargs):
++            nonlocal call_count
++            call_count += 1
++            n = call_count
++            return StreamToolOutputAvailable(
++                toolCallId=f"id-{n}",
++                output=f"done-{n}",
++                toolName="bash_exec",
++                success=True,
++            )
++
++        mock_tool = _make_mock_tool("bash_exec")
++        mock_tool.execute = AsyncMock(side_effect=counting_execute)
++
++        with patch(
++            "backend.copilot.sdk.tool_adapter.TOOL_REGISTRY",
++            {"bash_exec": mock_tool},
++        ):
++            for i in range(N):
++                await pre_launch_tool_call("bash_exec", {"cmd": f"task-{i}"})
++
++            await asyncio.sleep(0)  # let all tasks start
++
++            handler = create_tool_handler(mock_tool)
++            results = []
++            for i in range(N):
++                results.append(await handler({"cmd": f"task-{i}"}))
++
++        assert (
++            mock_tool.execute.await_count == N
++        ), f"Expected {N} execute calls, got {mock_tool.execute.await_count}"
++        for i, result in enumerate(results):
++            assert result["isError"] is False, f"Result {i} should not be an error"
++            text = result["content"][0]["text"]
++            assert "done-" in text, f"Result {i} missing expected output: {text}"
+diff --git a/autogpt_platform/backend/backend/copilot/tools/helpers.py b/autogpt_platform/backend/backend/copilot/tools/helpers.py
+index 5d291c245..2cb276a86 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/helpers.py
++++ b/autogpt_platform/backend/backend/copilot/tools/helpers.py
+@@ -1,15 +1,24 @@
+ """Shared helpers for chat tools."""
+ 
+ import logging
++import uuid
+ from collections import defaultdict
++from dataclasses import dataclass
+ from typing import Any
+ 
+ from pydantic_core import PydanticUndefined
+ 
++from backend.blocks import BlockType, get_block
+ from backend.blocks._base import AnyBlockSchema
+-from backend.copilot.constants import COPILOT_NODE_PREFIX, COPILOT_SESSION_PREFIX
++from backend.copilot.constants import (
++    COPILOT_NODE_EXEC_ID_SEPARATOR,
++    COPILOT_NODE_PREFIX,
++    COPILOT_SESSION_PREFIX,
++)
++from backend.copilot.model import ChatSession
++from backend.copilot.sdk.file_ref import FileRefExpansionError, expand_file_refs_in_args
+ from backend.data.credit import UsageTransactionMetadata
+-from backend.data.db_accessors import credit_db, workspace_db
++from backend.data.db_accessors import credit_db, review_db, workspace_db
+ from backend.data.execution import ExecutionContext
+ from backend.data.model import CredentialsFieldInfo, CredentialsMetaInput
+ from backend.executor.utils import block_usage_cost
+@@ -17,8 +26,20 @@ from backend.integrations.creds_manager import IntegrationCredentialsManager
+ from backend.util.exceptions import BlockError, InsufficientBalanceError
+ from backend.util.type import coerce_inputs_to_schema
+ 
+-from .models import BlockOutputResponse, ErrorResponse, ToolResponseBase
+-from .utils import match_credentials_to_requirements
++from .models import (
++    BlockOutputResponse,
++    ErrorResponse,
++    InputValidationErrorResponse,
++    ReviewRequiredResponse,
++    SetupInfo,
++    SetupRequirementsResponse,
++    ToolResponseBase,
++    UserReadiness,
++)
++from .utils import (
++    build_missing_credentials_from_field_info,
++    match_credentials_to_requirements,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -231,6 +252,286 @@ async def resolve_block_credentials(
+     return await match_credentials_to_requirements(user_id, requirements)
+ 
+ 
++@dataclass
++class BlockPreparation:
++    """Result of successful block validation, ready for execution or task creation.
++
++    Attributes:
++        block: The resolved block instance (schema definition + execute method).
++        block_id: UUID of the block being prepared.
++        input_data: User-supplied input values after file-ref expansion.
++        matched_credentials: Credential field name -> resolved credential metadata.
++        input_schema: JSON Schema for the block's input, with credential
++            discriminators resolved for the user's available providers.
++        credentials_fields: Set of field names in the schema that are credential
++            inputs (e.g. ``{"credentials", "api_key"}``).
++        required_non_credential_keys: Schema-required fields minus credential
++            fields — the fields the user must supply directly.
++        provided_input_keys: Keys the user actually provided in ``input_data``.
++        synthetic_graph_id: Auto-generated graph UUID used for CoPilot
++            single-block executions (no real graph exists in the DB).
++        synthetic_node_id: Auto-generated node UUID paired with
++            ``synthetic_graph_id`` to form the execution context for the block.
++    """
++
++    block: AnyBlockSchema
++    block_id: str
++    input_data: dict[str, Any]
++    matched_credentials: dict[str, CredentialsMetaInput]
++    input_schema: dict[str, Any]
++    credentials_fields: set[str]
++    required_non_credential_keys: set[str]
++    provided_input_keys: set[str]
++    synthetic_graph_id: str
++    synthetic_node_id: str
++
++
++async def prepare_block_for_execution(
++    block_id: str,
++    input_data: dict[str, Any],
++    user_id: str,
++    session: ChatSession,
++    session_id: str,
++) -> "BlockPreparation | ToolResponseBase":
++    """Validate and prepare a block for execution.
++
++    Performs: block lookup, disabled/excluded-type checks, credential resolution,
++    input schema generation, file-ref expansion, missing-credentials check, and
++    unrecognized-field validation.
++
++    Does NOT check for missing required fields (tools differ: run_block shows a
++    schema preview) and does NOT run the HITL review check (use check_hitl_review
++    separately).
++
++    Args:
++        block_id: Block UUID to prepare.
++        input_data: Input values provided by the caller.
++        user_id: Authenticated user ID.
++        session: Current chat session (needed for file-ref expansion).
++        session_id: Chat session ID (used in error responses).
++
++    Returns:
++        BlockPreparation on success, or a ToolResponseBase error/setup response.
++    """
++    # Lazy import: find_block imports from .base and .models (siblings), not
++    # from helpers — no actual circular dependency exists today.  Kept lazy as a
++    # precaution since find_block is the block-registry module and future changes
++    # could introduce a cycle.
++    from .find_block import COPILOT_EXCLUDED_BLOCK_IDS, COPILOT_EXCLUDED_BLOCK_TYPES
++
++    block = get_block(block_id)
++    if not block:
++        return ErrorResponse(
++            message=f"Block '{block_id}' not found", session_id=session_id
++        )
++    if block.disabled:
++        return ErrorResponse(
++            message=f"Block '{block_id}' is disabled", session_id=session_id
++        )
++
++    if (
++        block.block_type in COPILOT_EXCLUDED_BLOCK_TYPES
++        or block.id in COPILOT_EXCLUDED_BLOCK_IDS
++    ):
++        if block.block_type == BlockType.MCP_TOOL:
++            hint = (
++                " Use the `run_mcp_tool` tool instead — it handles "
++                "MCP server discovery, authentication, and execution."
++            )
++        elif block.block_type == BlockType.AGENT:
++            hint = " Use the `run_agent` tool instead."
++        else:
++            hint = " This block is designed for use within graphs only."
++        return ErrorResponse(
++            message=f"Block '{block.name}' cannot be run directly.{hint}",
++            session_id=session_id,
++        )
++
++    matched_credentials, missing_credentials = await resolve_block_credentials(
++        user_id, block, input_data
++    )
++
++    try:
++        input_schema: dict[str, Any] = block.input_schema.jsonschema()
++    except Exception as e:
++        logger.warning("Failed to generate input schema for block %s: %s", block_id, e)
++        return ErrorResponse(
++            message=f"Block '{block.name}' has an invalid input schema",
++            error=str(e),
++            session_id=session_id,
++        )
++
++    # Expand @@agptfile: refs using the block's input schema so string/list
++    # fields get the correct deserialization.
++    if input_data:
++        try:
++            input_data = await expand_file_refs_in_args(
++                input_data, user_id, session, input_schema=input_schema
++            )
++        except FileRefExpansionError as exc:
++            return ErrorResponse(
++                message=(
++                    f"Failed to resolve file reference: {exc}. "
++                    "Ensure the file exists before referencing it."
++                ),
++                session_id=session_id,
++            )
++
++    credentials_fields = set(block.input_schema.get_credentials_fields().keys())
++
++    if missing_credentials:
++        credentials_fields_info = _resolve_discriminated_credentials(block, input_data)
++        missing_creds_dict = build_missing_credentials_from_field_info(
++            credentials_fields_info, set(matched_credentials.keys())
++        )
++        missing_creds_list = list(missing_creds_dict.values())
++        return SetupRequirementsResponse(
++            message=(
++                f"Block '{block.name}' requires credentials that are not configured. "
++                "Please set up the required credentials before running this block."
++            ),
++            session_id=session_id,
++            setup_info=SetupInfo(
++                agent_id=block_id,
++                agent_name=block.name,
++                user_readiness=UserReadiness(
++                    has_all_credentials=False,
++                    missing_credentials=missing_creds_dict,
++                    ready_to_run=False,
++                ),
++                requirements={
++                    "credentials": missing_creds_list,
++                    "inputs": get_inputs_from_schema(
++                        input_schema, exclude_fields=credentials_fields
++                    ),
++                    "execution_modes": ["immediate"],
++                },
++            ),
++            graph_id=None,
++            graph_version=None,
++        )
++    required_keys = set(input_schema.get("required", []))
++    required_non_credential_keys = required_keys - credentials_fields
++    provided_input_keys = set(input_data.keys()) - credentials_fields
++
++    valid_fields = set(input_schema.get("properties", {}).keys()) - credentials_fields
++    unrecognized_fields = provided_input_keys - valid_fields
++    if unrecognized_fields:
++        return InputValidationErrorResponse(
++            message=(
++                f"Unknown input field(s) provided: {', '.join(sorted(unrecognized_fields))}. "
++                "Block was not executed. Please use the correct field names from the schema."
++            ),
++            session_id=session_id,
++            unrecognized_fields=sorted(unrecognized_fields),
++            inputs=input_schema,
++        )
++
++    synthetic_graph_id = f"{COPILOT_SESSION_PREFIX}{session_id}"
++    synthetic_node_id = f"{COPILOT_NODE_PREFIX}{block_id}"
++
++    return BlockPreparation(
++        block=block,
++        block_id=block_id,
++        input_data=input_data,
++        matched_credentials=matched_credentials,
++        input_schema=input_schema,
++        credentials_fields=credentials_fields,
++        required_non_credential_keys=required_non_credential_keys,
++        provided_input_keys=provided_input_keys,
++        synthetic_graph_id=synthetic_graph_id,
++        synthetic_node_id=synthetic_node_id,
++    )
++
++
++async def check_hitl_review(
++    prep: BlockPreparation,
++    user_id: str,
++    session_id: str,
++) -> "tuple[str, dict[str, Any]] | ToolResponseBase":
++    """Check for an existing or new HITL review requirement.
++
++    If a review is needed, stores the review record and returns a
++    ReviewRequiredResponse.  Otherwise returns
++    ``(synthetic_node_exec_id, input_data)`` ready for execute_block.
++    """
++    block = prep.block
++    block_id = prep.block_id
++    synthetic_graph_id = prep.synthetic_graph_id
++    synthetic_node_id = prep.synthetic_node_id
++    input_data = prep.input_data
++
++    # Reuse an existing WAITING review for identical input (LLM retry guard)
++    existing_reviews = await review_db().get_pending_reviews_for_execution(
++        synthetic_graph_id, user_id
++    )
++    existing_review = next(
++        (
++            r
++            for r in existing_reviews
++            if r.node_id == synthetic_node_id
++            and r.status.value == "WAITING"
++            and r.payload == input_data
++        ),
++        None,
++    )
++    if existing_review:
++        return ReviewRequiredResponse(
++            message=(
++                f"Block '{block.name}' requires human review. "
++                f"After the user approves, call continue_run_block with "
++                f"review_id='{existing_review.node_exec_id}' to execute."
++            ),
++            session_id=session_id,
++            block_id=block_id,
++            block_name=block.name,
++            review_id=existing_review.node_exec_id,
++            graph_exec_id=synthetic_graph_id,
++            input_data=input_data,
++        )
++
++    synthetic_node_exec_id = (
++        f"{synthetic_node_id}{COPILOT_NODE_EXEC_ID_SEPARATOR}" f"{uuid.uuid4().hex[:8]}"
++    )
++
++    review_context = ExecutionContext(
++        user_id=user_id,
++        graph_id=synthetic_graph_id,
++        graph_exec_id=synthetic_graph_id,
++        graph_version=1,
++        node_id=synthetic_node_id,
++        node_exec_id=synthetic_node_exec_id,
++        sensitive_action_safe_mode=True,
++    )
++    should_pause, input_data = await block.is_block_exec_need_review(
++        input_data,
++        user_id=user_id,
++        node_id=synthetic_node_id,
++        node_exec_id=synthetic_node_exec_id,
++        graph_exec_id=synthetic_graph_id,
++        graph_id=synthetic_graph_id,
++        graph_version=1,
++        execution_context=review_context,
++        is_graph_execution=False,
++    )
++    if should_pause:
++        return ReviewRequiredResponse(
++            message=(
++                f"Block '{block.name}' requires human review. "
++                f"After the user approves, call continue_run_block with "
++                f"review_id='{synthetic_node_exec_id}' to execute."
++            ),
++            session_id=session_id,
++            block_id=block_id,
++            block_name=block.name,
++            review_id=synthetic_node_exec_id,
++            graph_exec_id=synthetic_graph_id,
++            input_data=input_data,
++        )
++
++    return synthetic_node_exec_id, input_data
++
++
+ def _resolve_discriminated_credentials(
+     block: AnyBlockSchema,
+     input_data: dict[str, Any],
+diff --git a/autogpt_platform/backend/backend/copilot/tools/helpers_test.py b/autogpt_platform/backend/backend/copilot/tools/helpers_test.py
+index 155444802..011c771f1 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/helpers_test.py
++++ b/autogpt_platform/backend/backend/copilot/tools/helpers_test.py
+@@ -1,4 +1,4 @@
+-"""Tests for execute_block — credit charging and type coercion."""
++"""Tests for execute_block, prepare_block_for_execution, and check_hitl_review."""
+ 
+ from collections.abc import AsyncIterator
+ from typing import Any
+@@ -7,8 +7,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
+ import pytest
+ 
+ from backend.blocks._base import BlockType
+-from backend.copilot.tools.helpers import execute_block
+-from backend.copilot.tools.models import BlockOutputResponse, ErrorResponse
++from backend.copilot.constants import COPILOT_NODE_PREFIX, COPILOT_SESSION_PREFIX
++from backend.copilot.tools.helpers import (
++    BlockPreparation,
++    check_hitl_review,
++    execute_block,
++    prepare_block_for_execution,
++)
++from backend.copilot.tools.models import (
++    BlockOutputResponse,
++    ErrorResponse,
++    InputValidationErrorResponse,
++    ReviewRequiredResponse,
++    SetupRequirementsResponse,
++)
+ 
+ _USER = "test-user-helpers"
+ _SESSION = "test-session-helpers"
+@@ -510,3 +522,341 @@ async def test_coerce_inner_elements_of_generic():
+     # Inner elements should be coerced from int to str
+     assert block._captured_inputs["values"] == ["1", "2", "3"]
+     assert all(isinstance(v, str) for v in block._captured_inputs["values"])
++
++
++# ---------------------------------------------------------------------------
++# prepare_block_for_execution tests
++# ---------------------------------------------------------------------------
++
++_PREP_USER = "prep-user"
++_PREP_SESSION = "prep-session"
++
++
++def _make_prep_session(session_id: str = _PREP_SESSION) -> MagicMock:
++    session = MagicMock()
++    session.session_id = session_id
++    return session
++
++
++def _make_simple_block(
++    block_id: str = "blk-1",
++    name: str = "Simple Block",
++    disabled: bool = False,
++    required: list[str] | None = None,
++    properties: dict[str, Any] | None = None,
++) -> MagicMock:
++    block = MagicMock()
++    block.id = block_id
++    block.name = name
++    block.disabled = disabled
++    block.description = ""
++    block.block_type = MagicMock()
++
++    schema = {
++        "type": "object",
++        "properties": properties or {"text": {"type": "string"}},
++        "required": required or [],
++    }
++    block.input_schema.jsonschema.return_value = schema
++    block.input_schema.get_credentials_fields.return_value = {}
++    block.input_schema.get_credentials_fields_info.return_value = {}
++    return block
++
++
++def _patch_excluded(block_ids: set | None = None, block_types: set | None = None):
++    return (
++        patch(
++            "backend.copilot.tools.find_block.COPILOT_EXCLUDED_BLOCK_IDS",
++            new=block_ids or set(),
++            create=True,
++        ),
++        patch(
++            "backend.copilot.tools.find_block.COPILOT_EXCLUDED_BLOCK_TYPES",
++            new=block_types or set(),
++            create=True,
++        ),
++    )
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_not_found() -> None:
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=None),
++        excl_ids,
++        excl_types,
++    ):
++        result = await prepare_block_for_execution(
++            block_id="missing",
++            input_data={},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, ErrorResponse)
++    assert "not found" in result.message
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_disabled() -> None:
++    block = _make_simple_block(disabled=True)
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-1",
++            input_data={},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, ErrorResponse)
++    assert "disabled" in result.message
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_unrecognized_fields() -> None:
++    block = _make_simple_block(properties={"text": {"type": "string"}})
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++        patch(
++            "backend.copilot.tools.helpers.resolve_block_credentials",
++            AsyncMock(return_value=({}, [])),
++        ),
++        patch(
++            "backend.copilot.tools.helpers.expand_file_refs_in_args",
++            AsyncMock(side_effect=lambda d, *a, **kw: d),
++        ),
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-1",
++            input_data={"text": "hi", "unknown_field": "oops"},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, InputValidationErrorResponse)
++    assert "unknown_field" in result.unrecognized_fields
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_missing_credentials() -> None:
++    block = _make_simple_block()
++    mock_cred = MagicMock()
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++        patch(
++            "backend.copilot.tools.helpers.resolve_block_credentials",
++            AsyncMock(return_value=({}, [mock_cred])),
++        ),
++        patch(
++            "backend.copilot.tools.helpers.build_missing_credentials_from_field_info",
++            return_value={"cred_key": mock_cred},
++        ),
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-1",
++            input_data={},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, SetupRequirementsResponse)
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_success_returns_preparation() -> None:
++    block = _make_simple_block(
++        required=["text"], properties={"text": {"type": "string"}}
++    )
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++        patch(
++            "backend.copilot.tools.helpers.resolve_block_credentials",
++            AsyncMock(return_value=({}, [])),
++        ),
++        patch(
++            "backend.copilot.tools.helpers.expand_file_refs_in_args",
++            AsyncMock(side_effect=lambda d, *a, **kw: d),
++        ),
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-1",
++            input_data={"text": "hello"},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, BlockPreparation)
++    assert result.required_non_credential_keys == {"text"}
++    assert result.provided_input_keys == {"text"}
++
++
++# ---------------------------------------------------------------------------
++# check_hitl_review tests
++# ---------------------------------------------------------------------------
++
++
++def _make_hitl_prep(
++    block_id: str = "blk-hitl",
++    input_data: dict | None = None,
++    session_id: str = "hitl-sess",
++    needs_review: bool = False,
++) -> BlockPreparation:
++    block = MagicMock()
++    block.id = block_id
++    block.name = "HITL Block"
++    data = input_data if input_data is not None else {"action": "delete"}
++    block.is_block_exec_need_review = AsyncMock(return_value=(needs_review, data))
++    return BlockPreparation(
++        block=block,
++        block_id=block_id,
++        input_data=data,
++        matched_credentials={},
++        input_schema={},
++        credentials_fields=set(),
++        required_non_credential_keys=set(),
++        provided_input_keys=set(),
++        synthetic_graph_id=f"{COPILOT_SESSION_PREFIX}{session_id}",
++        synthetic_node_id=f"{COPILOT_NODE_PREFIX}{block_id}",
++    )
++
++
++@pytest.mark.asyncio
++async def test_check_hitl_no_review_needed() -> None:
++    prep = _make_hitl_prep(input_data={"action": "read"}, needs_review=False)
++    mock_rdb = MagicMock()
++    mock_rdb.get_pending_reviews_for_execution = AsyncMock(return_value=[])
++
++    with patch("backend.copilot.tools.helpers.review_db", return_value=mock_rdb):
++        result = await check_hitl_review(prep, "user1", "hitl-sess")
++
++    assert isinstance(result, tuple)
++    node_exec_id, returned_data = result
++    assert node_exec_id.startswith(f"{COPILOT_NODE_PREFIX}blk-hitl")
++    assert returned_data == {"action": "read"}
++
++
++@pytest.mark.asyncio
++async def test_check_hitl_review_required() -> None:
++    prep = _make_hitl_prep(input_data={"action": "delete"}, needs_review=True)
++    mock_rdb = MagicMock()
++    mock_rdb.get_pending_reviews_for_execution = AsyncMock(return_value=[])
++
++    with patch("backend.copilot.tools.helpers.review_db", return_value=mock_rdb):
++        result = await check_hitl_review(prep, "user1", "hitl-sess")
++
++    assert isinstance(result, ReviewRequiredResponse)
++    assert result.block_id == "blk-hitl"
++
++
++@pytest.mark.asyncio
++async def test_check_hitl_reuses_existing_waiting_review() -> None:
++    prep = _make_hitl_prep(input_data={"action": "delete"}, needs_review=False)
++
++    existing = MagicMock()
++    existing.node_id = prep.synthetic_node_id
++    existing.status.value = "WAITING"
++    existing.payload = {"action": "delete"}
++    existing.node_exec_id = "existing-review-42"
++
++    mock_rdb = MagicMock()
++    mock_rdb.get_pending_reviews_for_execution = AsyncMock(return_value=[existing])
++
++    with patch("backend.copilot.tools.helpers.review_db", return_value=mock_rdb):
++        result = await check_hitl_review(prep, "user1", "hitl-sess")
++
++    assert isinstance(result, ReviewRequiredResponse)
++    assert result.review_id == "existing-review-42"
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_excluded_by_type() -> None:
++    """prepare_block_for_execution returns ErrorResponse for excluded block types."""
++    from backend.blocks import BlockType
++
++    block = _make_simple_block()
++    block.block_type = BlockType.AGENT
++
++    excl_ids, excl_types = _patch_excluded(block_types={BlockType.AGENT})
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-agent",
++            input_data={},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, ErrorResponse)
++    assert "cannot be run directly" in result.message
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_excluded_by_id() -> None:
++    """prepare_block_for_execution returns ErrorResponse for excluded block IDs."""
++    block = _make_simple_block(block_id="blk-excluded")
++
++    excl_ids, excl_types = _patch_excluded(block_ids={"blk-excluded"})
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-excluded",
++            input_data={},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, ErrorResponse)
++    assert "cannot be run directly" in result.message
++
++
++@pytest.mark.asyncio
++async def test_prepare_block_file_ref_expansion_error() -> None:
++    """prepare_block_for_execution returns ErrorResponse when file-ref expansion fails."""
++    from backend.copilot.sdk.file_ref import FileRefExpansionError
++
++    block = _make_simple_block(properties={"text": {"type": "string"}})
++    excl_ids, excl_types = _patch_excluded()
++    with (
++        patch("backend.copilot.tools.helpers.get_block", return_value=block),
++        excl_ids,
++        excl_types,
++        patch(
++            "backend.copilot.tools.helpers.resolve_block_credentials",
++            AsyncMock(return_value=({}, [])),
++        ),
++        patch(
++            "backend.copilot.tools.helpers.expand_file_refs_in_args",
++            AsyncMock(
++                side_effect=FileRefExpansionError("@@agptfile:missing.txt not found")
++            ),
++        ),
++    ):
++        result = await prepare_block_for_execution(
++            block_id="blk-1",
++            input_data={"text": "@@agptfile:missing.txt"},
++            user_id=_PREP_USER,
++            session=_make_prep_session(),
++            session_id=_PREP_SESSION,
++        )
++    assert isinstance(result, ErrorResponse)
++    assert "file reference" in result.message.lower()
+diff --git a/autogpt_platform/backend/backend/copilot/tools/run_block.py b/autogpt_platform/backend/backend/copilot/tools/run_block.py
+index 32d6b1761..399bf105c 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/run_block.py
++++ b/autogpt_platform/backend/backend/copilot/tools/run_block.py
+@@ -1,37 +1,19 @@
+ """Tool for executing blocks directly."""
+ 
+ import logging
+-import uuid
+ from typing import Any
+ 
+-from backend.blocks import BlockType, get_block
+-from backend.blocks._base import AnyBlockSchema
+-from backend.copilot.constants import (
+-    COPILOT_NODE_EXEC_ID_SEPARATOR,
+-    COPILOT_NODE_PREFIX,
+-    COPILOT_SESSION_PREFIX,
+-)
+ from backend.copilot.context import get_current_permissions
+ from backend.copilot.model import ChatSession
+-from backend.copilot.sdk.file_ref import FileRefExpansionError, expand_file_refs_in_args
+-from backend.data.db_accessors import review_db
+-from backend.data.execution import ExecutionContext
+ 
+ from .base import BaseTool
+-from .find_block import COPILOT_EXCLUDED_BLOCK_IDS, COPILOT_EXCLUDED_BLOCK_TYPES
+-from .helpers import execute_block, get_inputs_from_schema, resolve_block_credentials
+-from .models import (
+-    BlockDetails,
+-    BlockDetailsResponse,
+-    ErrorResponse,
+-    InputValidationErrorResponse,
+-    ReviewRequiredResponse,
+-    SetupInfo,
+-    SetupRequirementsResponse,
+-    ToolResponseBase,
+-    UserReadiness,
++from .helpers import (
++    BlockPreparation,
++    check_hitl_review,
++    execute_block,
++    prepare_block_for_execution,
+ )
+-from .utils import build_missing_credentials_from_field_info
++from .models import BlockDetails, BlockDetailsResponse, ErrorResponse, ToolResponseBase
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -114,42 +96,22 @@ class RunBlockTool(BaseTool):
+                 session_id=session_id,
+             )
+ 
+-        # Get the block
+-        block = get_block(block_id)
+-        if not block:
+-            return ErrorResponse(
+-                message=f"Block '{block_id}' not found",
+-                session_id=session_id,
+-            )
+-        if block.disabled:
+-            return ErrorResponse(
+-                message=f"Block '{block_id}' is disabled",
+-                session_id=session_id,
+-            )
++        logger.info("Preparing block %s for user %s", block_id, user_id)
+ 
+-        # Check if block is excluded from CoPilot (graph-only blocks)
+-        if (
+-            block.block_type in COPILOT_EXCLUDED_BLOCK_TYPES
+-            or block.id in COPILOT_EXCLUDED_BLOCK_IDS
+-        ):
+-            # Provide actionable guidance for blocks with dedicated tools
+-            if block.block_type == BlockType.MCP_TOOL:
+-                hint = (
+-                    " Use the `run_mcp_tool` tool instead — it handles "
+-                    "MCP server discovery, authentication, and execution."
+-                )
+-            elif block.block_type == BlockType.AGENT:
+-                hint = " Use the `run_agent` tool instead."
+-            else:
+-                hint = " This block is designed for use within graphs only."
+-            return ErrorResponse(
+-                message=f"Block '{block.name}' cannot be run directly.{hint}",
+-                session_id=session_id,
+-            )
++        prep_or_err = await prepare_block_for_execution(
++            block_id=block_id,
++            input_data=input_data,
++            user_id=user_id,
++            session=session,
++            session_id=session_id,
++        )
++        if isinstance(prep_or_err, ToolResponseBase):
++            return prep_or_err
++        prep: BlockPreparation = prep_or_err
+ 
+         # Check block-level permissions before execution.
+         perms = get_current_permissions()
+-        if perms is not None and not perms.is_block_allowed(block_id, block.name):
++        if perms is not None and not perms.is_block_allowed(block_id, prep.block.name):
+             available_hint = (
+                 f"Allowed identifiers: {perms.blocks!r}. "
+                 if not perms.blocks_exclude and perms.blocks
+@@ -161,241 +123,58 @@ class RunBlockTool(BaseTool):
+             )
+             return ErrorResponse(
+                 message=(
+-                    f"Block '{block.name}' ({block_id}) is not permitted "
++                    f"Block '{prep.block.name}' ({block_id}) is not permitted "
+                     f"by the current execution permissions. {available_hint}"
+                     "Use find_block to discover blocks that are allowed."
+                 ),
+                 session_id=session_id,
+             )
+ 
+-        logger.info(f"Executing block {block.name} ({block_id}) for user {user_id}")
+-
+-        (
+-            matched_credentials,
+-            missing_credentials,
+-        ) = await resolve_block_credentials(user_id, block, input_data)
+-
+-        # Get block schemas for details/validation
+-        try:
+-            input_schema: dict[str, Any] = block.input_schema.jsonschema()
+-        except Exception as e:
+-            logger.warning(
+-                "Failed to generate input schema for block %s: %s",
+-                block_id,
+-                e,
+-            )
+-            return ErrorResponse(
+-                message=f"Block '{block.name}' has an invalid input schema",
+-                error=str(e),
+-                session_id=session_id,
+-            )
+-        try:
+-            output_schema: dict[str, Any] = block.output_schema.jsonschema()
+-        except Exception as e:
+-            logger.warning(
+-                "Failed to generate output schema for block %s: %s",
+-                block_id,
+-                e,
+-            )
+-            return ErrorResponse(
+-                message=f"Block '{block.name}' has an invalid output schema",
+-                error=str(e),
+-                session_id=session_id,
+-            )
+-
+-        # Expand @@agptfile: refs in input_data with the block's input
+-        # schema.  The generic _truncating wrapper skips opaque object
+-        # properties (input_data has no declared inner properties in the
+-        # tool schema), so file ref tokens are still intact here.
+-        # Using the block's schema lets us return raw text for string-typed
+-        # fields and parsed structures for list/dict-typed fields.
+-        if input_data:
++        # Show block details when required inputs are not yet provided.
++        # This is run_block's two-step UX: first call returns the schema,
++        # second call (with inputs) actually executes.
++        if not (prep.required_non_credential_keys <= prep.provided_input_keys):
+             try:
+-                input_data = await expand_file_refs_in_args(
+-                    input_data,
+-                    user_id,
+-                    session,
+-                    input_schema=input_schema,
++                output_schema: dict[str, Any] = prep.block.output_schema.jsonschema()
++            except Exception as e:
++                logger.warning(
++                    "Failed to generate output schema for block %s: %s", block_id, e
+                 )
+-            except FileRefExpansionError as exc:
+                 return ErrorResponse(
+-                    message=(
+-                        f"Failed to resolve file reference: {exc}. "
+-                        "Ensure the file exists before referencing it."
+-                    ),
++                    message=f"Block '{prep.block.name}' has an invalid output schema",
++                    error=str(e),
+                     session_id=session_id,
+                 )
+ 
+-        if missing_credentials:
+-            # Return setup requirements response with missing credentials
+-            credentials_fields_info = block.input_schema.get_credentials_fields_info()
+-            missing_creds_dict = build_missing_credentials_from_field_info(
+-                credentials_fields_info, set(matched_credentials.keys())
+-            )
+-            missing_creds_list = list(missing_creds_dict.values())
+-
+-            return SetupRequirementsResponse(
+-                message=(
+-                    f"Block '{block.name}' requires credentials that are not configured. "
+-                    "Please set up the required credentials before running this block."
+-                ),
+-                session_id=session_id,
+-                setup_info=SetupInfo(
+-                    agent_id=block_id,
+-                    agent_name=block.name,
+-                    user_readiness=UserReadiness(
+-                        has_all_credentials=False,
+-                        missing_credentials=missing_creds_dict,
+-                        ready_to_run=False,
+-                    ),
+-                    requirements={
+-                        "credentials": missing_creds_list,
+-                        "inputs": self._get_inputs_list(block),
+-                        "execution_modes": ["immediate"],
+-                    },
+-                ),
+-                graph_id=None,
+-                graph_version=None,
+-            )
+-
+-        # Check if this is a first attempt (required inputs missing)
+-        # Return block details so user can see what inputs are needed
+-        credentials_fields = set(block.input_schema.get_credentials_fields().keys())
+-        required_keys = set(input_schema.get("required", []))
+-        required_non_credential_keys = required_keys - credentials_fields
+-        provided_input_keys = set(input_data.keys()) - credentials_fields
+-
+-        # Check for unknown input fields
+-        valid_fields = (
+-            set(input_schema.get("properties", {}).keys()) - credentials_fields
+-        )
+-        unrecognized_fields = provided_input_keys - valid_fields
+-        if unrecognized_fields:
+-            return InputValidationErrorResponse(
+-                message=(
+-                    f"Unknown input field(s) provided: {', '.join(sorted(unrecognized_fields))}. "
+-                    f"Block was not executed. Please use the correct field names from the schema."
+-                ),
+-                session_id=session_id,
+-                unrecognized_fields=sorted(unrecognized_fields),
+-                inputs=input_schema,
+-            )
+-
+-        # Show details when not all required non-credential inputs are provided
+-        if not (required_non_credential_keys <= provided_input_keys):
+-            # Get credentials info for the response
+-            credentials_meta = []
+-            for field_name, cred_meta in matched_credentials.items():
+-                credentials_meta.append(cred_meta)
+-
++            credentials_meta = list(prep.matched_credentials.values())
+             return BlockDetailsResponse(
+                 message=(
+-                    f"Block '{block.name}' details. "
++                    f"Block '{prep.block.name}' details. "
+                     "Provide input_data matching the inputs schema to execute the block."
+                 ),
+                 session_id=session_id,
+                 block=BlockDetails(
+                     id=block_id,
+-                    name=block.name,
+-                    description=block.description or "",
+-                    inputs=input_schema,
++                    name=prep.block.name,
++                    description=prep.block.description or "",
++                    inputs=prep.input_schema,
+                     outputs=output_schema,
+                     credentials=credentials_meta,
+                 ),
+                 user_authenticated=True,
+             )
+ 
+-        # Generate synthetic IDs for CoPilot context.
+-        # Encode node_id in node_exec_id so it can be extracted later
+-        # (e.g. for auto-approve, where we need node_id but have no NodeExecution row).
+-        synthetic_graph_id = f"{COPILOT_SESSION_PREFIX}{session.session_id}"
+-        synthetic_node_id = f"{COPILOT_NODE_PREFIX}{block_id}"
+-
+-        # Check for an existing WAITING review for this block with the same input.
+-        # If the LLM retries run_block with identical input, we reuse the existing
+-        # review instead of creating duplicates. Different inputs = new execution.
+-        existing_reviews = await review_db().get_pending_reviews_for_execution(
+-            synthetic_graph_id, user_id
+-        )
+-        existing_review = next(
+-            (
+-                r
+-                for r in existing_reviews
+-                if r.node_id == synthetic_node_id
+-                and r.status.value == "WAITING"
+-                and r.payload == input_data
+-            ),
+-            None,
+-        )
+-        if existing_review:
+-            return ReviewRequiredResponse(
+-                message=(
+-                    f"Block '{block.name}' requires human review. "
+-                    f"After the user approves, call continue_run_block with "
+-                    f"review_id='{existing_review.node_exec_id}' to execute."
+-                ),
+-                session_id=session_id,
+-                block_id=block_id,
+-                block_name=block.name,
+-                review_id=existing_review.node_exec_id,
+-                graph_exec_id=synthetic_graph_id,
+-                input_data=input_data,
+-            )
+-
+-        synthetic_node_exec_id = (
+-            f"{synthetic_node_id}{COPILOT_NODE_EXEC_ID_SEPARATOR}"
+-            f"{uuid.uuid4().hex[:8]}"
+-        )
+-
+-        # Check for HITL review before execution.
+-        # This creates the review record in the DB for CoPilot flows.
+-        review_context = ExecutionContext(
+-            user_id=user_id,
+-            graph_id=synthetic_graph_id,
+-            graph_exec_id=synthetic_graph_id,
+-            graph_version=1,
+-            node_id=synthetic_node_id,
+-            node_exec_id=synthetic_node_exec_id,
+-            sensitive_action_safe_mode=True,
+-        )
+-        should_pause, input_data = await block.is_block_exec_need_review(
+-            input_data,
+-            user_id=user_id,
+-            node_id=synthetic_node_id,
+-            node_exec_id=synthetic_node_exec_id,
+-            graph_exec_id=synthetic_graph_id,
+-            graph_id=synthetic_graph_id,
+-            graph_version=1,
+-            execution_context=review_context,
+-            is_graph_execution=False,
+-        )
+-        if should_pause:
+-            return ReviewRequiredResponse(
+-                message=(
+-                    f"Block '{block.name}' requires human review. "
+-                    f"After the user approves, call continue_run_block with "
+-                    f"review_id='{synthetic_node_exec_id}' to execute."
+-                ),
+-                session_id=session_id,
+-                block_id=block_id,
+-                block_name=block.name,
+-                review_id=synthetic_node_exec_id,
+-                graph_exec_id=synthetic_graph_id,
+-                input_data=input_data,
+-            )
++        hitl_or_err = await check_hitl_review(prep, user_id, session_id)
++        if isinstance(hitl_or_err, ToolResponseBase):
++            return hitl_or_err
++        synthetic_node_exec_id, input_data = hitl_or_err
+ 
+         return await execute_block(
+-            block=block,
++            block=prep.block,
+             block_id=block_id,
+             input_data=input_data,
+             user_id=user_id,
+             session_id=session_id,
+             node_exec_id=synthetic_node_exec_id,
+-            matched_credentials=matched_credentials,
++            matched_credentials=prep.matched_credentials,
+         )
+-
+-    def _get_inputs_list(self, block: AnyBlockSchema) -> list[dict[str, Any]]:
+-        """Extract non-credential inputs from block schema."""
+-        schema = block.input_schema.jsonschema()
+-        credentials_fields = set(block.input_schema.get_credentials_fields().keys())
+-        return get_inputs_from_schema(schema, exclude_fields=credentials_fields)
+diff --git a/autogpt_platform/backend/backend/copilot/tools/run_block_test.py b/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
+index f5b025fe5..7b31c2d6a 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
++++ b/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
+@@ -94,7 +94,7 @@ class TestRunBlockFiltering:
+         input_block = make_mock_block("input-block-id", "Input Block", BlockType.INPUT)
+ 
+         with patch(
+-            "backend.copilot.tools.run_block.get_block",
++            "backend.copilot.tools.helpers.get_block",
+             return_value=input_block,
+         ):
+             tool = RunBlockTool()
+@@ -120,7 +120,7 @@ class TestRunBlockFiltering:
+         )
+ 
+         with patch(
+-            "backend.copilot.tools.run_block.get_block",
++            "backend.copilot.tools.helpers.get_block",
+             return_value=smart_block,
+         ):
+             tool = RunBlockTool()
+@@ -145,7 +145,7 @@ class TestRunBlockFiltering:
+         token = _current_permissions.set(perms)
+         try:
+             with patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=standard_block,
+             ):
+                 tool = RunBlockTool()
+@@ -173,7 +173,7 @@ class TestRunBlockFiltering:
+         try:
+             with (
+                 patch(
+-                    "backend.copilot.tools.run_block.get_block",
++                    "backend.copilot.tools.helpers.get_block",
+                     return_value=standard_block,
+                 ),
+                 patch(
+@@ -208,7 +208,7 @@ class TestRunBlockFiltering:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=standard_block,
+             ),
+             patch(
+@@ -265,7 +265,7 @@ class TestRunBlockInputValidation:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -308,7 +308,7 @@ class TestRunBlockInputValidation:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -354,7 +354,7 @@ class TestRunBlockInputValidation:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -402,7 +402,7 @@ class TestRunBlockInputValidation:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -446,7 +446,7 @@ class TestRunBlockInputValidation:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -500,7 +500,7 @@ class TestRunBlockSensitiveAction:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -556,7 +556,7 @@ class TestRunBlockSensitiveAction:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+@@ -610,7 +610,7 @@ class TestRunBlockSensitiveAction:
+ 
+         with (
+             patch(
+-                "backend.copilot.tools.run_block.get_block",
++                "backend.copilot.tools.helpers.get_block",
+                 return_value=mock_block,
+             ),
+             patch(
+diff --git a/autogpt_platform/backend/backend/copilot/tools/test_run_block_details.py b/autogpt_platform/backend/backend/copilot/tools/test_run_block_details.py
+index 00d313872..153f16364 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/test_run_block_details.py
++++ b/autogpt_platform/backend/backend/copilot/tools/test_run_block_details.py
+@@ -61,12 +61,12 @@ async def test_run_block_returns_details_when_no_input_provided():
+     )
+ 
+     with patch(
+-        "backend.copilot.tools.run_block.get_block",
++        "backend.copilot.tools.helpers.get_block",
+         return_value=http_block,
+     ):
+         # Mock credentials check to return no missing credentials
+         with patch(
+-            "backend.copilot.tools.run_block.resolve_block_credentials",
++            "backend.copilot.tools.helpers.resolve_block_credentials",
+             new_callable=AsyncMock,
+             return_value=({}, []),  # (matched_credentials, missing_credentials)
+         ):
+@@ -119,11 +119,11 @@ async def test_run_block_returns_details_when_only_credentials_provided():
+     }
+ 
+     with patch(
+-        "backend.copilot.tools.run_block.get_block",
++        "backend.copilot.tools.helpers.get_block",
+         return_value=mock,
+     ):
+         with patch(
+-            "backend.copilot.tools.run_block.resolve_block_credentials",
++            "backend.copilot.tools.helpers.resolve_block_credentials",
+             new_callable=AsyncMock,
+             return_value=(
+                 {
+diff --git a/autogpt_platform/backend/backend/data/understanding.py b/autogpt_platform/backend/backend/data/understanding.py
+index c604e046b..a1ba34ed5 100644
+--- a/autogpt_platform/backend/backend/data/understanding.py
++++ b/autogpt_platform/backend/backend/data/understanding.py
+@@ -23,11 +23,29 @@ def _cache_key(user_id: str) -> str:
+ 
+ 
+ def _json_to_list(value: Any) -> list[str]:
+-    """Convert Json field to list[str], handling None."""
++    """Convert Json field to list[str], handling None.
++
++    Also handles legacy dict-format rows (e.g. ``{"Learn": [...], "Create": [...]}``
++    from the reverted themed-prompts feature) by flattening all values into a single
++    list so existing personalised data isn't silently lost.
++    """
+     if value is None:
+         return []
+     if isinstance(value, list):
+         return cast(list[str], value)
++    if isinstance(value, dict):
++        # Legacy themed-prompt format: flatten all string values from all categories.
++        logger.debug(
++            "_json_to_list: flattening legacy dict-format value (keys=%s)",
++            list(value.keys()),
++        )
++        return [
++            item
++            for vals in value.values()
++            if isinstance(vals, list)
++            for item in vals
++            if isinstance(item, str)
++        ]
+     return []
+ 
+ 

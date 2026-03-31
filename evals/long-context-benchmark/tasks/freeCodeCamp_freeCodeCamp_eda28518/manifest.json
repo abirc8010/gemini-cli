@@ -1,0 +1,13 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_eda28518",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "81fe118aed88d2e7bec10c86c85db9e39b71a81e",
+  "solution_commit": "eda285189bf47a71aa298890eeee5bd436cde708",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    "curriculum/challenges/english/blocks/lab-rpg-character/67d83df6f82eda3868dd2a84.md",
+    "curriculum/challenges/english/blocks/workshop-countup/69447054012a22f38c944ff0.md",
+    "curriculum/challenges/english/blocks/workshop-media-catalogue/68b702892910ab7b495de081.md"
+  ]
+}

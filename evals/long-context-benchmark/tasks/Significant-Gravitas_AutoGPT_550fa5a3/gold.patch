@@ -1,0 +1,677 @@
+diff --git a/autogpt_platform/backend/backend/copilot/executor/processor.py b/autogpt_platform/backend/backend/copilot/executor/processor.py
+index 2df52e798..c111cd6df 100644
+--- a/autogpt_platform/backend/backend/copilot/executor/processor.py
++++ b/autogpt_platform/backend/backend/copilot/executor/processor.py
+@@ -14,7 +14,7 @@ import time
+ from backend.copilot import stream_registry
+ from backend.copilot.baseline import stream_chat_completion_baseline
+ from backend.copilot.config import ChatConfig
+-from backend.copilot.response_model import StreamFinish
++from backend.copilot.response_model import StreamError
+ from backend.copilot.sdk import service as sdk_service
+ from backend.copilot.sdk.dummy import stream_chat_completion_dummy
+ from backend.executor.cluster_lock import ClusterLock
+@@ -23,6 +23,7 @@ from backend.util.feature_flag import Flag, is_feature_enabled
+ from backend.util.logging import TruncatedLogger, configure_logging
+ from backend.util.process import set_service_name
+ from backend.util.retry import func_retry
++from backend.util.workspace_storage import shutdown_workspace_storage
+ 
+ from .utils import CoPilotExecutionEntry, CoPilotLogMetadata
+ 
+@@ -153,8 +154,6 @@ class CoPilotProcessor:
+         worker's event loop, ensuring ``aiohttp.ClientSession.close()``
+         runs on the same loop that created the session.
+         """
+-        from backend.util.workspace_storage import shutdown_workspace_storage
+-
+         coro = shutdown_workspace_storage()
+         try:
+             future = asyncio.run_coroutine_threadsafe(coro, self.execution_loop)
+@@ -268,35 +267,37 @@ class CoPilotProcessor:
+                 log.info(f"Using {'SDK' if use_sdk else 'baseline'} service")
+ 
+             # Stream chat completion and publish chunks to Redis.
+-            async for chunk in stream_fn(
++            # stream_and_publish wraps the raw stream with registry
++            # publishing (shared with collect_copilot_response).
++            raw_stream = stream_fn(
+                 session_id=entry.session_id,
+                 message=entry.message if entry.message else None,
+                 is_user_message=entry.is_user_message,
+                 user_id=entry.user_id,
+                 context=entry.context,
+                 file_ids=entry.file_ids,
++            )
++            async for chunk in stream_registry.stream_and_publish(
++                session_id=entry.session_id,
++                turn_id=entry.turn_id,
++                stream=raw_stream,
+             ):
+                 if cancel.is_set():
+                     log.info("Cancel requested, breaking stream")
+                     break
+ 
++                # Capture StreamError so mark_session_completed receives
++                # the error message (stream_and_publish yields but does
++                # not publish StreamError — that's done by mark_session_completed).
++                if isinstance(chunk, StreamError):
++                    error_msg = chunk.errorText
++                    break
++
+                 current_time = time.monotonic()
+                 if current_time - last_refresh >= refresh_interval:
+                     cluster_lock.refresh()
+                     last_refresh = current_time
+ 
+-                # Skip StreamFinish — mark_session_completed publishes it.
+-                if isinstance(chunk, StreamFinish):
+-                    continue
+-
+-                try:
+-                    await stream_registry.publish_chunk(entry.turn_id, chunk)
+-                except Exception as e:
+-                    log.error(
+-                        f"Error publishing chunk {type(chunk).__name__}: {e}",
+-                        exc_info=True,
+-                    )
+-
+             # Stream loop completed
+             if cancel.is_set():
+                 log.info("Stream cancelled by user")
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/collect.py b/autogpt_platform/backend/backend/copilot/sdk/collect.py
+index 184bbfb5a..50952d6aa 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/collect.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/collect.py
+@@ -7,20 +7,35 @@ without implementing their own event loop.
+ 
+ from __future__ import annotations
+ 
++import logging
++import uuid
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
+ from typing import TYPE_CHECKING, Any
+ 
+-from backend.copilot.response_model import (
++if TYPE_CHECKING:
++    from backend.copilot.permissions import CopilotPermissions
++
++from pydantic import BaseModel, Field
++from redis.exceptions import RedisError
++
++from .. import stream_registry
++from ..response_model import (
+     StreamError,
+     StreamTextDelta,
+     StreamToolInputAvailable,
+     StreamToolOutputAvailable,
+     StreamUsage,
+ )
+-
+ from .service import stream_chat_completion_sdk
+ 
+-if TYPE_CHECKING:
+-    from backend.copilot.permissions import CopilotPermissions
++logger = logging.getLogger(__name__)
++
++# Identifiers used when registering AutoPilot-originated streams in the
++# stream registry.  Distinct from "chat_stream"/"chat" used by the HTTP SSE
++# endpoint, making it easy to filter AutoPilot streams in logs/observability.
++AUTOPILOT_TOOL_CALL_ID = "autopilot_stream"
++AUTOPILOT_TOOL_NAME = "autopilot"
+ 
+ 
+ class CopilotResult:
+@@ -46,6 +61,111 @@ class CopilotResult:
+         self.total_tokens: int = 0
+ 
+ 
++class _RegistryHandle(BaseModel):
++    """Tracks stream registry session state for cleanup."""
++
++    publish_turn_id: str = ""
++    error_msg: str | None = None
++    error_already_published: bool = False
++
++
++@asynccontextmanager
++async def _registry_session(
++    session_id: str, user_id: str, turn_id: str
++) -> AsyncIterator[_RegistryHandle]:
++    """Create a stream registry session and ensure it is finalized."""
++    handle = _RegistryHandle(publish_turn_id=turn_id)
++    try:
++        await stream_registry.create_session(
++            session_id=session_id,
++            user_id=user_id,
++            tool_call_id=AUTOPILOT_TOOL_CALL_ID,
++            tool_name=AUTOPILOT_TOOL_NAME,
++            turn_id=turn_id,
++        )
++    except (RedisError, ConnectionError, OSError):
++        logger.warning(
++            "[collect] Failed to create stream registry session for %s, "
++            "frontend will not receive real-time updates",
++            session_id[:12],
++            exc_info=True,
++        )
++        # Disable chunk publishing but keep finalization enabled so
++        # mark_session_completed can clean up any partial registry state.
++        handle.publish_turn_id = ""
++
++    try:
++        yield handle
++    finally:
++        try:
++            await stream_registry.mark_session_completed(
++                session_id,
++                error_message=handle.error_msg,
++                skip_error_publish=handle.error_already_published,
++            )
++        except (RedisError, ConnectionError, OSError):
++            logger.warning(
++                "[collect] Failed to mark stream completed for %s",
++                session_id[:12],
++                exc_info=True,
++            )
++
++
++class _ToolCallEntry(BaseModel):
++    """A single tool call observed during stream consumption."""
++
++    tool_call_id: str
++    tool_name: str
++    input: Any
++    output: Any = None
++    success: bool | None = None
++
++
++class _EventAccumulator(BaseModel):
++    """Mutable accumulator for stream events."""
++
++    response_parts: list[str] = Field(default_factory=list)
++    tool_calls: list[_ToolCallEntry] = Field(default_factory=list)
++    tool_calls_by_id: dict[str, _ToolCallEntry] = Field(default_factory=dict)
++    prompt_tokens: int = 0
++    completion_tokens: int = 0
++    total_tokens: int = 0
++
++
++def _process_event(event: object, acc: _EventAccumulator) -> str | None:
++    """Process a single stream event and return error_msg if StreamError.
++
++    Uses structural pattern matching for dispatch per project guidelines.
++    """
++    match event:
++        case StreamTextDelta(delta=delta):
++            acc.response_parts.append(delta)
++        case StreamToolInputAvailable() as e:
++            entry = _ToolCallEntry(
++                tool_call_id=e.toolCallId,
++                tool_name=e.toolName,
++                input=e.input,
++            )
++            acc.tool_calls.append(entry)
++            acc.tool_calls_by_id[e.toolCallId] = entry
++        case StreamToolOutputAvailable() as e:
++            if tc := acc.tool_calls_by_id.get(e.toolCallId):
++                tc.output = e.output
++                tc.success = e.success
++            else:
++                logger.debug(
++                    "Received tool output for unknown tool_call_id: %s",
++                    e.toolCallId,
++                )
++        case StreamUsage() as e:
++            acc.prompt_tokens += e.prompt_tokens
++            acc.completion_tokens += e.completion_tokens
++            acc.total_tokens += e.total_tokens
++        case StreamError(errorText=err):
++            return err
++    return None
++
++
+ async def collect_copilot_response(
+     *,
+     session_id: str,
+@@ -56,11 +176,8 @@ async def collect_copilot_response(
+ ) -> CopilotResult:
+     """Consume :func:`stream_chat_completion_sdk` and return aggregated results.
+ 
+-    This is the recommended entry-point for callers that need a simple
+-    request-response interface (e.g. the AutoPilot block) rather than
+-    streaming individual events.  It avoids duplicating the event-collection
+-    logic and does NOT wrap the stream in ``asyncio.timeout`` — the SDK
+-    manages its own heartbeat-based timeouts internally.
++    Registers with the stream registry so the frontend can connect via SSE
++    and receive real-time updates while the AutoPilot block is executing.
+ 
+     Args:
+         session_id: Chat session to use.
+@@ -77,39 +194,39 @@ async def collect_copilot_response(
+     Raises:
+         RuntimeError: If the stream yields a ``StreamError`` event.
+     """
++    turn_id = str(uuid.uuid4())
++    async with _registry_session(session_id, user_id, turn_id) as handle:
++        try:
++            raw_stream = stream_chat_completion_sdk(
++                session_id=session_id,
++                message=message,
++                is_user_message=is_user_message,
++                user_id=user_id,
++                permissions=permissions,
++            )
++            published_stream = stream_registry.stream_and_publish(
++                session_id=session_id,
++                turn_id=handle.publish_turn_id,
++                stream=raw_stream,
++            )
++
++            acc = _EventAccumulator()
++            async for event in published_stream:
++                if err := _process_event(event, acc):
++                    handle.error_msg = err
++                    # stream_and_publish skips StreamError events, so
++                    # mark_session_completed must publish the error to Redis.
++                    handle.error_already_published = False
++                    raise RuntimeError(f"Copilot error: {err}")
++        except Exception:
++            if handle.error_msg is None:
++                handle.error_msg = "AutoPilot execution failed"
++            raise
++
+     result = CopilotResult()
+-    response_parts: list[str] = []
+-    tool_calls_by_id: dict[str, dict[str, Any]] = {}
+-
+-    async for event in stream_chat_completion_sdk(
+-        session_id=session_id,
+-        message=message,
+-        is_user_message=is_user_message,
+-        user_id=user_id,
+-        permissions=permissions,
+-    ):
+-        if isinstance(event, StreamTextDelta):
+-            response_parts.append(event.delta)
+-        elif isinstance(event, StreamToolInputAvailable):
+-            entry: dict[str, Any] = {
+-                "tool_call_id": event.toolCallId,
+-                "tool_name": event.toolName,
+-                "input": event.input,
+-                "output": None,
+-                "success": None,
+-            }
+-            result.tool_calls.append(entry)
+-            tool_calls_by_id[event.toolCallId] = entry
+-        elif isinstance(event, StreamToolOutputAvailable):
+-            if tc := tool_calls_by_id.get(event.toolCallId):
+-                tc["output"] = event.output
+-                tc["success"] = event.success
+-        elif isinstance(event, StreamUsage):
+-            result.prompt_tokens += event.prompt_tokens
+-            result.completion_tokens += event.completion_tokens
+-            result.total_tokens += event.total_tokens
+-        elif isinstance(event, StreamError):
+-            raise RuntimeError(f"Copilot error: {event.errorText}")
+-
+-    result.response_text = "".join(response_parts)
++    result.response_text = "".join(acc.response_parts)
++    result.tool_calls = [tc.model_dump() for tc in acc.tool_calls]
++    result.prompt_tokens = acc.prompt_tokens
++    result.completion_tokens = acc.completion_tokens
++    result.total_tokens = acc.total_tokens
+     return result
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/collect_test.py b/autogpt_platform/backend/backend/copilot/sdk/collect_test.py
+new file mode 100644
+index 000000000..d86d1f4fb
+--- /dev/null
++++ b/autogpt_platform/backend/backend/copilot/sdk/collect_test.py
+@@ -0,0 +1,177 @@
++"""Tests for collect_copilot_response stream registry integration."""
++
++from unittest.mock import AsyncMock, patch
++
++import pytest
++
++from backend.copilot.response_model import (
++    StreamError,
++    StreamFinish,
++    StreamTextDelta,
++    StreamToolInputAvailable,
++    StreamToolOutputAvailable,
++    StreamUsage,
++)
++from backend.copilot.sdk.collect import collect_copilot_response
++
++
++def _mock_stream_fn(*events):
++    """Return a callable that returns an async generator."""
++
++    async def _gen(**_kwargs):
++        for e in events:
++            yield e
++
++    return _gen
++
++
++@pytest.fixture
++def mock_registry():
++    """Patch stream_registry module used by collect."""
++    with patch("backend.copilot.sdk.collect.stream_registry") as m:
++        m.create_session = AsyncMock()
++        m.publish_chunk = AsyncMock()
++        m.mark_session_completed = AsyncMock()
++
++        # stream_and_publish: pass-through that also publishes (real logic)
++        # We re-implement the pass-through here so the event loop works,
++        # but still track publish_chunk calls via the mock.
++        async def _stream_and_publish(session_id, turn_id, stream):
++            async for event in stream:
++                if turn_id and not isinstance(event, (StreamFinish, StreamError)):
++                    await m.publish_chunk(turn_id, event)
++                yield event
++
++        m.stream_and_publish = _stream_and_publish
++        yield m
++
++
++@pytest.fixture
++def stream_fn_patch():
++    """Helper to patch stream_chat_completion_sdk."""
++
++    def _patch(events):
++        return patch(
++            "backend.copilot.sdk.collect.stream_chat_completion_sdk",
++            new=_mock_stream_fn(*events),
++        )
++
++    return _patch
++
++
++@pytest.mark.asyncio
++async def test_stream_registry_called_on_success(mock_registry, stream_fn_patch):
++    """Stream registry create/publish/complete are called correctly on success."""
++    events = [
++        StreamTextDelta(id="t1", delta="Hello "),
++        StreamTextDelta(id="t1", delta="world"),
++        StreamUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
++        StreamFinish(),
++    ]
++
++    with stream_fn_patch(events):
++        result = await collect_copilot_response(
++            session_id="test-session",
++            message="hi",
++            user_id="user-1",
++        )
++
++    assert result.response_text == "Hello world"
++    assert result.total_tokens == 15
++
++    mock_registry.create_session.assert_awaited_once()
++    # StreamFinish should NOT be published (mark_session_completed does it)
++    published_types = [
++        type(call.args[1]).__name__
++        for call in mock_registry.publish_chunk.call_args_list
++    ]
++    assert "StreamFinish" not in published_types
++    assert "StreamTextDelta" in published_types
++
++    mock_registry.mark_session_completed.assert_awaited_once()
++    _, kwargs = mock_registry.mark_session_completed.call_args
++    assert kwargs.get("error_message") is None
++
++
++@pytest.mark.asyncio
++async def test_stream_registry_error_on_stream_error(mock_registry, stream_fn_patch):
++    """mark_session_completed receives error message when StreamError occurs."""
++    events = [
++        StreamTextDelta(id="t1", delta="partial"),
++        StreamError(errorText="something broke"),
++    ]
++
++    with stream_fn_patch(events):
++        with pytest.raises(RuntimeError, match="something broke"):
++            await collect_copilot_response(
++                session_id="test-session",
++                message="hi",
++                user_id="user-1",
++            )
++
++    _, kwargs = mock_registry.mark_session_completed.call_args
++    assert kwargs.get("error_message") == "something broke"
++    # stream_and_publish skips StreamError, so mark_session_completed must
++    # publish it (skip_error_publish=False).
++    assert kwargs.get("skip_error_publish") is False
++
++    # StreamError should NOT be published via publish_chunk — mark_session_completed
++    # handles it to avoid double-publication.
++    published_types = [
++        type(call.args[1]).__name__
++        for call in mock_registry.publish_chunk.call_args_list
++    ]
++    assert "StreamError" not in published_types
++
++
++@pytest.mark.asyncio
++async def test_graceful_degradation_when_create_session_fails(
++    mock_registry, stream_fn_patch
++):
++    """AutoPilot still works when stream registry create_session raises."""
++    events = [
++        StreamTextDelta(id="t1", delta="works"),
++        StreamFinish(),
++    ]
++    mock_registry.create_session = AsyncMock(side_effect=ConnectionError("Redis down"))
++
++    with stream_fn_patch(events):
++        result = await collect_copilot_response(
++            session_id="test-session",
++            message="hi",
++            user_id="user-1",
++        )
++
++    assert result.response_text == "works"
++    # publish_chunk should NOT be called because turn_id was cleared
++    mock_registry.publish_chunk.assert_not_awaited()
++    # mark_session_completed IS still called to clean up any partial state
++    mock_registry.mark_session_completed.assert_awaited_once()
++
++
++@pytest.mark.asyncio
++async def test_tool_calls_published_and_collected(mock_registry, stream_fn_patch):
++    """Tool call events are both published to registry and collected in result."""
++    events = [
++        StreamToolInputAvailable(
++            toolCallId="tc-1", toolName="read_file", input={"path": "/tmp"}
++        ),
++        StreamToolOutputAvailable(
++            toolCallId="tc-1", output="file contents", success=True
++        ),
++        StreamTextDelta(id="t1", delta="done"),
++        StreamFinish(),
++    ]
++
++    with stream_fn_patch(events):
++        result = await collect_copilot_response(
++            session_id="test-session",
++            message="hi",
++            user_id="user-1",
++        )
++
++    assert len(result.tool_calls) == 1
++    assert result.tool_calls[0]["tool_name"] == "read_file"
++    assert result.tool_calls[0]["output"] == "file contents"
++    assert result.tool_calls[0]["success"] is True
++    assert result.response_text == "done"
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/service.py b/autogpt_platform/backend/backend/copilot/sdk/service.py
+index 0e71405ca..db416af16 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/service.py
++++ b/autogpt_platform/backend/backend/copilot/sdk/service.py
+@@ -2151,6 +2151,16 @@ async def stream_chat_completion_sdk(
+                 log_prefix,
+                 len(session.messages),
+             )
++    except GeneratorExit:
++        # GeneratorExit is raised when the async generator is closed by the
++        # caller (e.g. client disconnect, page refresh).  We MUST release the
++        # stream lock here because the ``finally`` block at the end of this
++        # function may not execute when GeneratorExit propagates through nested
++        # async generators.  Without this, the lock stays held for its full TTL
++        # and the user sees "Another stream is already active" on every retry.
++        logger.warning("%s GeneratorExit — releasing stream lock", log_prefix)
++        await lock.release()
++        raise
+     except BaseException as e:
+         # Catch BaseException to handle both Exception and CancelledError
+         # (CancelledError inherits from BaseException in Python 3.8+)
+diff --git a/autogpt_platform/backend/backend/copilot/stream_registry.py b/autogpt_platform/backend/backend/copilot/stream_registry.py
+index 823e4807f..3c8691603 100644
+--- a/autogpt_platform/backend/backend/copilot/stream_registry.py
++++ b/autogpt_platform/backend/backend/copilot/stream_registry.py
+@@ -17,11 +17,13 @@ Subscribers:
+ import asyncio
+ import logging
+ import time
++from collections.abc import AsyncIterator
+ from dataclasses import dataclass, field
+ from datetime import datetime, timezone
+ from typing import Any, Literal
+ 
+ import orjson
++from redis.exceptions import RedisError
+ 
+ from backend.api.model import CopilotCompletionPayload
+ from backend.data.notification_bus import (
+@@ -33,12 +35,21 @@ from backend.data.redis_client import get_redis_async
+ from .config import ChatConfig
+ from .executor.utils import COPILOT_CONSUMER_TIMEOUT_SECONDS
+ from .response_model import (
++    ResponseType,
+     StreamBaseResponse,
+     StreamError,
+     StreamFinish,
++    StreamFinishStep,
+     StreamHeartbeat,
++    StreamStart,
++    StreamStartStep,
+     StreamTextDelta,
++    StreamTextEnd,
+     StreamTextStart,
++    StreamToolInputAvailable,
++    StreamToolInputStart,
++    StreamToolOutputAvailable,
++    StreamUsage,
+ )
+ 
+ logger = logging.getLogger(__name__)
+@@ -280,6 +291,56 @@ async def publish_chunk(
+     return message_id
+ 
+ 
++async def stream_and_publish(
++    session_id: str,
++    turn_id: str,
++    stream: AsyncIterator[StreamBaseResponse],
++) -> AsyncIterator[StreamBaseResponse]:
++    """Wrap an async stream iterator with registry publishing.
++
++    Publishes each chunk to the stream registry for frontend SSE consumption,
++    skipping ``StreamFinish`` and ``StreamError`` (which are published by
++    :func:`mark_session_completed`).
++
++    This is a pass-through: every event from *stream* is yielded unchanged so
++    the caller can still consume and aggregate them.  The caller is responsible
++    for calling :func:`create_session` before and :func:`mark_session_completed`
++    after iterating.
++
++    Args:
++        session_id: Chat session ID (for logging only).
++        turn_id: Turn UUID that identifies the Redis stream to publish to.
++            If empty, publishing is silently skipped (graceful degradation).
++        stream: The underlying async iterator of stream events.
++
++    Yields:
++        Every event from *stream*, unchanged.
++    """
++    publish_failed_once = False
++
++    async for event in stream:
++        if turn_id and not isinstance(event, (StreamFinish, StreamError)):
++            try:
++                await publish_chunk(turn_id, event)
++            except (RedisError, ConnectionError, OSError):
++                if not publish_failed_once:
++                    publish_failed_once = True
++                    logger.warning(
++                        "[stream_and_publish] Failed to publish chunk %s for %s "
++                        "(further failures logged at DEBUG)",
++                        type(event).__name__,
++                        session_id[:12],
++                        exc_info=True,
++                    )
++                else:
++                    logger.debug(
++                        "[stream_and_publish] Failed to publish chunk %s",
++                        type(event).__name__,
++                        exc_info=True,
++                    )
++        yield event
++
++
+ async def subscribe_to_session(
+     session_id: str,
+     user_id: str | None,
+@@ -693,6 +754,8 @@ async def _stream_listener(
+ async def mark_session_completed(
+     session_id: str,
+     error_message: str | None = None,
++    *,
++    skip_error_publish: bool = False,
+ ) -> bool:
+     """Mark a session as completed, then publish StreamFinish.
+ 
+@@ -708,6 +771,10 @@ async def mark_session_completed(
+         session_id: Session ID to mark as completed
+         error_message: If provided, marks as "failed" and publishes a
+             StreamError before StreamFinish. Otherwise marks as "completed".
++        skip_error_publish: If True, still marks the session as "failed" but
++            does NOT publish a StreamError event. Use this when the error has
++            already been published to the stream (e.g. via stream_and_publish)
++            to avoid duplicate error delivery to the frontend.
+ 
+     Returns:
+         True if session was newly marked completed, False if already completed/failed
+@@ -727,7 +794,7 @@ async def mark_session_completed(
+         logger.debug(f"Session {session_id} already completed/failed, skipping")
+         return False
+ 
+-    if error_message:
++    if error_message and not skip_error_publish:
+         try:
+             await publish_chunk(turn_id, StreamError(errorText=error_message))
+         except Exception as e:
+@@ -913,21 +980,6 @@ def _reconstruct_chunk(chunk_data: dict) -> StreamBaseResponse | None:
+     Returns:
+         Reconstructed response object, or None if unknown type
+     """
+-    from .response_model import (
+-        ResponseType,
+-        StreamError,
+-        StreamFinish,
+-        StreamFinishStep,
+-        StreamHeartbeat,
+-        StreamStart,
+-        StreamStartStep,
+-        StreamTextEnd,
+-        StreamToolInputAvailable,
+-        StreamToolInputStart,
+-        StreamToolOutputAvailable,
+-        StreamUsage,
+-    )
+-
+     # Map response types to their corresponding classes
+     type_to_class: dict[str, type[StreamBaseResponse]] = {
+         ResponseType.START.value: StreamStart,

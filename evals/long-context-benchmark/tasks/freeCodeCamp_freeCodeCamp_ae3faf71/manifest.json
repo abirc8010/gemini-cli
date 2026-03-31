@@ -1,0 +1,12 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_ae3faf71",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "22b61790647615733771ba344c2a26be81deb0fa",
+  "solution_commit": "ae3faf71b580d6838485beb639c720d68d4f46f8",
+  "test_cmd": "npm test",
+  "impacted_files": [
+    ".github/scripts/pr-guidelines/check-pr-template.js",
+    ".github/workflows/github-pr-guidelines.yml"
+  ]
+}

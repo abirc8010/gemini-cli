@@ -1,0 +1,15 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_85f0d835",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "866563ad25a663b5960b369df3c4cca0146755dc",
+  "solution_commit": "85f0d8353ae4db1cbd55fb23ad7d8e82cdd1223b",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/data/workspace.py",
+    "autogpt_platform/backend/backend/util/metrics.py",
+    "autogpt_platform/frontend/src/app/(platform)/copilot/components/ChatSidebar/ChatSidebar.tsx",
+    "autogpt_platform/frontend/src/app/(platform)/copilot/components/UsageLimits/UsageLimits.tsx",
+    "autogpt_platform/frontend/src/app/(platform)/profile/(user)/credits/page.tsx"
+  ]
+}

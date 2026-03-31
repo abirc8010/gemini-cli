@@ -1,0 +1,12 @@
+{
+  "task_id": "yt-dlp_yt-dlp_1effa06d",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "f8b3fe33f68495ade453602a201b33e3aa69ed1f",
+  "solution_commit": "1effa06dbf4dfd2e307b445a55a465d897205213",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "yt_dlp/extractor/_extractors.py",
+    "yt_dlp/extractor/volejtv.py"
+  ]
+}

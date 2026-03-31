@@ -1,0 +1,129 @@
+diff --git a/curriculum/challenges/english/blocks/lab-rpg-character/67d83df6f82eda3868dd2a84.md b/curriculum/challenges/english/blocks/lab-rpg-character/67d83df6f82eda3868dd2a84.md
+index 50c9e90b51..69225cad3f 100644
+--- a/curriculum/challenges/english/blocks/lab-rpg-character/67d83df6f82eda3868dd2a84.md
++++ b/curriculum/challenges/english/blocks/lab-rpg-character/67d83df6f82eda3868dd2a84.md
+@@ -54,7 +54,7 @@ assert _Node(_code).has_function('create_character')
+ })
+ ```
+ 
+-When `create_character` is called with a first argument that is not a string it should return `The character name should be a string`.
++When `create_character` is called with a first argument that is **not** a string it should return `The character name should be a string`.
+ 
+ ```js
+ ({
+@@ -68,7 +68,7 @@ for wrong_type in wrong_types:
+ })
+ ```
+ 
+-When `create_character` is called with a first argument that is a string it should not return `The character name should be a string`.
++When `create_character` is called with a first argument that is a string it **should not** return `The character name should be a string`.
+ 
+ ```js
+ ({
+@@ -90,7 +90,7 @@ assert create_character('', 4, 2, 1) == 'The character should have a name'
+ })
+ ```
+ 
+-When `create_character` is called with a first argument that is not an empty string, it should not return `The character should have a name`.
++When `create_character` is called with a first argument that is **not** an empty string, it **should not** return `The character should have a name`.
+ 
+ ```js
+ ({
+@@ -115,7 +115,7 @@ for length in range(11, 27):
+ })
+ ```
+ 
+-The `create_character` function should not say that the character is too long when it's not longer than 10 characters.
++The `create_character` function **should not** say that the character is too long when it's not longer than 10 characters.
+ 
+ ```js
+ ({
+@@ -140,7 +140,7 @@ assert create_character('cha cha', 4, 1, 2) == 'The character name should not co
+ })
+ ```
+ 
+-When `create_character` is called with a first argument that does not contain a space it should not return `The character name should not contain spaces`.
++When `create_character` is called with a first argument that *does not* contain a space it *should not* return `The character name should not contain spaces`.
+ 
+ ```js
+ ({
+@@ -152,7 +152,7 @@ assert create_character('chacha', 4, 2, 1) != 'The character name should not con
+ })
+ ```
+ 
+-When `create_character` is called with a second, third or fourth argument that is not an integer it should return `All stats should be integers`.
++When `create_character` is called with a second, third or fourth argument that is **not** an integer it should return `All stats should be integers`.
+ 
+ ```js
+ ({
+@@ -168,7 +168,7 @@ for wrong_type in wrong_types:
+ })
+ ```
+ 
+-When `create_character` is called with a second, third and fourth argument that are all integers it should not return `All stats should be integers`.
++When `create_character` is called with a second, third and fourth argument that are all integers it **should not** return `All stats should be integers`.
+ 
+ ```js
+ ({
+@@ -199,7 +199,7 @@ assert create_character('ren', 4, 4, -1) == expected
+ })
+ ```
+ 
+-When `create_character` is called with a second, third and fourth argument that are all no less than `1` it should not return `All stats should be no less than 1`.
++When `create_character` is called with a second, third and fourth argument that are all no less than `1` it **should not** return `All stats should be no less than 1`.
+ 
+ ```js
+ ({
+@@ -225,7 +225,7 @@ assert create_character('ren', 1, 1, 5) == 'All stats should be no more than 4'
+ })
+ ```
+ 
+-When `create_character` is called with a second, third and fourth argument that are all no more than `4` it should not return `All stats should be no more than 4`.
++When `create_character` is called with a second, third and fourth argument that are all no more than `4` it **should not** return `All stats should be no more than 4`.
+ 
+ ```js
+ ({
+@@ -237,7 +237,7 @@ assert create_character('ren', 4, 2, 1) != 'All stats should be no more than 4'
+ })
+ ```
+ 
+-When `create_character` is called with a second, third or fourth argument that do not sum to `7` it should return `The character should start with 7 points`.
++When `create_character` is called with a second, third or fourth argument that **do not** sum to `7` it should return `The character should start with 7 points`.
+ 
+ ```js
+ ({
+@@ -251,7 +251,7 @@ assert create_character('ren', 1, 2, 3) == 'The character should start with 7 po
+ })
+ ```
+ 
+-When `create_character` is called with a second, third and fourth argument that sum to `7` it should not return `The character should start with 7 points`.
++When `create_character` is called with a second, third and fourth argument that sum to `7` it **should not** return `The character should start with 7 points`.
+ 
+ ```js
+ ({
+diff --git a/curriculum/challenges/english/blocks/workshop-countup/69447054012a22f38c944ff0.md b/curriculum/challenges/english/blocks/workshop-countup/69447054012a22f38c944ff0.md
+index 5263a4b346..a05d34fb4c 100644
+--- a/curriculum/challenges/english/blocks/workshop-countup/69447054012a22f38c944ff0.md
++++ b/curriculum/challenges/english/blocks/workshop-countup/69447054012a22f38c944ff0.md
+@@ -21,7 +21,7 @@ When `number` is less than `1` the function should return an empty array.
+ assert.deepStrictEqual(countup(0), []);
+ ```
+ 
+-When `number` is not less than `1` the function should not return anything.
++When `number` is **not** less than `1` the function **should not** return anything.
+ 
+ ```js
+ assert.isUndefined(countup(1)); 
+diff --git a/curriculum/challenges/english/blocks/workshop-media-catalogue/68b702892910ab7b495de081.md b/curriculum/challenges/english/blocks/workshop-media-catalogue/68b702892910ab7b495de081.md
+index 49dbaf7f16..c336e2c69e 100644
+--- a/curriculum/challenges/english/blocks/workshop-media-catalogue/68b702892910ab7b495de081.md
++++ b/curriculum/challenges/english/blocks/workshop-media-catalogue/68b702892910ab7b495de081.md
+@@ -42,7 +42,7 @@ Your `__str__` method should return `Media Catalogue (empty)` when `self.items`
+ })
+ ```
+ 
+-Your `__str__` method should not return `Media Catalogue (empty)` when `self.items` is not empty.
++Your `__str__` method **should not** return `Media Catalogue (empty)` when `self.items` is **not** empty.
+ 
+ ```js
+ ({

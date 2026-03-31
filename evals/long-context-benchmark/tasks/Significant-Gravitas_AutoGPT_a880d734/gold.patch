@@ -1,0 +1,2425 @@
+diff --git a/autogpt_platform/backend/backend/api/features/v1.py b/autogpt_platform/backend/backend/api/features/v1.py
+index 510ad636c..5f53a9175 100644
+--- a/autogpt_platform/backend/backend/api/features/v1.py
++++ b/autogpt_platform/backend/backend/api/features/v1.py
+@@ -980,14 +980,16 @@ async def execute_graph(
+     source: Annotated[GraphExecutionSource | None, Body(embed=True)] = None,
+     graph_version: Optional[int] = None,
+     preset_id: Optional[str] = None,
++    dry_run: Annotated[bool, Body(embed=True)] = False,
+ ) -> execution_db.GraphExecutionMeta:
+-    user_credit_model = await get_user_credit_model(user_id)
+-    current_balance = await user_credit_model.get_credits(user_id)
+-    if current_balance <= 0:
+-        raise HTTPException(
+-            status_code=402,
+-            detail="Insufficient balance to execute the agent. Please top up your account.",
+-        )
++    if not dry_run:
++        user_credit_model = await get_user_credit_model(user_id)
++        current_balance = await user_credit_model.get_credits(user_id)
++        if current_balance <= 0:
++            raise HTTPException(
++                status_code=402,
++                detail="Insufficient balance to execute the agent. Please top up your account.",
++            )
+ 
+     try:
+         result = await execution_utils.add_graph_execution(
+@@ -997,6 +999,7 @@ async def execute_graph(
+             preset_id=preset_id,
+             graph_version=graph_version,
+             graph_credentials_inputs=credentials_inputs,
++            dry_run=dry_run,
+         )
+         # Record successful graph execution
+         record_graph_execution(graph_id=graph_id, status="success", user_id=user_id)
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md b/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
+index 65a74392f..b33162e27 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
++++ b/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
+@@ -208,6 +208,20 @@ call in a loop until the task is complete:
+ Regular blocks work exactly like sub-agents as tools — wire each input
+ field from `source_name: "tools"` on the Orchestrator side.
+ 
++### Testing with Dry Run
++
++After saving an agent, suggest a dry run to validate wiring without consuming
++real API calls, credentials, or credits:
++
++1. **Run**: Call `run_agent` or `run_block` with `dry_run=True` and provide
++   sample inputs. This executes the graph with mock outputs, verifying that
++   links resolve correctly and required inputs are satisfied.
++2. **Check results**: Call `view_agent_output` with `show_execution_details=True`
++   to inspect the full node-by-node execution trace. This shows what each node
++   received as input and produced as output, making it easy to spot wiring issues.
++3. **Iterate**: If the dry run reveals wiring issues or missing inputs, fix
++   the agent JSON and re-save before suggesting a real execution.
++
+ ### Example: Simple AI Text Processor
+ 
+ A minimal agent with input, processing, and output:
+diff --git a/autogpt_platform/backend/backend/copilot/tools/agent_output.py b/autogpt_platform/backend/backend/copilot/tools/agent_output.py
+index e6610d72f..88033052f 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/agent_output.py
++++ b/autogpt_platform/backend/backend/copilot/tools/agent_output.py
+@@ -10,7 +10,12 @@ from pydantic import BaseModel, Field, field_validator
+ from backend.api.features.library.model import LibraryAgent
+ from backend.copilot.model import ChatSession
+ from backend.data.db_accessors import execution_db, library_db
+-from backend.data.execution import ExecutionStatus, GraphExecution, GraphExecutionMeta
++from backend.data.execution import (
++    ExecutionStatus,
++    GraphExecution,
++    GraphExecutionMeta,
++    GraphExecutionWithNodes,
++)
+ 
+ from .base import BaseTool
+ from .execution_utils import TERMINAL_STATUSES, wait_for_execution
+@@ -35,6 +40,7 @@ class AgentOutputInput(BaseModel):
+     execution_id: str = ""
+     run_time: str = "latest"
+     wait_if_running: int = Field(default=0, ge=0, le=300)
++    show_execution_details: bool = False
+ 
+     @field_validator(
+         "agent_name",
+@@ -146,6 +152,10 @@ class AgentOutputTool(BaseTool):
+                     "minimum": 0,
+                     "maximum": 300,
+                 },
++                "show_execution_details": {
++                    "type": "boolean",
++                    "description": "If true, include full node-by-node execution trace (inputs, outputs, status, timing for each node). Useful for debugging agent wiring. Default: false.",
++                },
+             },
+             "required": [],
+         }
+@@ -226,13 +236,19 @@ class AgentOutputTool(BaseTool):
+         time_start: datetime | None,
+         time_end: datetime | None,
+         include_running: bool = False,
+-    ) -> tuple[GraphExecution | None, list[GraphExecutionMeta], str | None]:
++        include_node_executions: bool = False,
++    ) -> tuple[
++        GraphExecution | GraphExecutionWithNodes | None,
++        list[GraphExecutionMeta],
++        str | None,
++    ]:
+         """
+         Fetch execution(s) based on filters.
+         Returns (single_execution, available_executions_meta, error_message).
+ 
+         Args:
+             include_running: If True, also look for running/queued executions (for waiting)
++            include_node_executions: If True, include node-by-node execution details
+         """
+         exec_db = execution_db()
+ 
+@@ -241,7 +257,7 @@ class AgentOutputTool(BaseTool):
+             execution = await exec_db.get_graph_execution(
+                 user_id=user_id,
+                 execution_id=execution_id,
+-                include_node_executions=False,
++                include_node_executions=include_node_executions,
+             )
+             if not execution:
+                 return None, [], f"Execution '{execution_id}' not found"
+@@ -279,7 +295,7 @@ class AgentOutputTool(BaseTool):
+             full_execution = await exec_db.get_graph_execution(
+                 user_id=user_id,
+                 execution_id=executions[0].id,
+-                include_node_executions=False,
++                include_node_executions=include_node_executions,
+             )
+             return full_execution, [], None
+ 
+@@ -287,14 +303,14 @@ class AgentOutputTool(BaseTool):
+         full_execution = await exec_db.get_graph_execution(
+             user_id=user_id,
+             execution_id=executions[0].id,
+-            include_node_executions=False,
++            include_node_executions=include_node_executions,
+         )
+         return full_execution, executions, None
+ 
+     def _build_response(
+         self,
+         agent: LibraryAgent,
+-        execution: GraphExecution | None,
++        execution: GraphExecution | GraphExecutionWithNodes | None,
+         available_executions: list[GraphExecutionMeta],
+         session_id: str | None,
+     ) -> AgentOutputResponse:
+@@ -312,6 +328,21 @@ class AgentOutputTool(BaseTool):
+                 total_executions=0,
+             )
+ 
++        node_executions_data = None
++        if isinstance(execution, GraphExecutionWithNodes):
++            node_executions_data = [
++                {
++                    "node_id": ne.node_id,
++                    "block_id": ne.block_id,
++                    "status": ne.status.value,
++                    "input_data": ne.input_data,
++                    "output_data": dict(ne.output_data),
++                    "start_time": ne.start_time.isoformat() if ne.start_time else None,
++                    "end_time": ne.end_time.isoformat() if ne.end_time else None,
++                }
++                for ne in execution.node_executions
++            ]
++
+         execution_info = ExecutionOutputInfo(
+             execution_id=execution.id,
+             status=execution.status.value,
+@@ -319,6 +350,7 @@ class AgentOutputTool(BaseTool):
+             ended_at=execution.ended_at,
+             outputs=dict(execution.outputs),
+             inputs_summary=execution.inputs if execution.inputs else None,
++            node_executions=node_executions_data,
+         )
+ 
+         available_list = None
+@@ -428,7 +460,7 @@ class AgentOutputTool(BaseTool):
+             execution = await execution_db().get_graph_execution(
+                 user_id=user_id,
+                 execution_id=input_data.execution_id,
+-                include_node_executions=False,
++                include_node_executions=input_data.show_execution_details,
+             )
+             if not execution:
+                 return ErrorResponse(
+@@ -484,6 +516,7 @@ class AgentOutputTool(BaseTool):
+             time_start=time_start,
+             time_end=time_end,
+             include_running=wait_timeout > 0,
++            include_node_executions=input_data.show_execution_details,
+         )
+ 
+         if exec_error:
+diff --git a/autogpt_platform/backend/backend/copilot/tools/continue_run_block.py b/autogpt_platform/backend/backend/copilot/tools/continue_run_block.py
+index 48a4ff238..f459bf38e 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/continue_run_block.py
++++ b/autogpt_platform/backend/backend/copilot/tools/continue_run_block.py
+@@ -119,8 +119,11 @@ class ContinueRunBlockTool(BaseTool):
+         )
+ 
+         logger.info(
+-            f"Continuing block {block.name} ({block_id}) for user {user_id} "
+-            f"with review_id={review_id}"
++            "Continuing block %s (%s) for user %s with review_id=%s",
++            block.name,
++            block_id,
++            user_id,
++            review_id,
+         )
+ 
+         matched_creds, missing_creds = await resolve_block_credentials(
+@@ -132,6 +135,9 @@ class ContinueRunBlockTool(BaseTool):
+                 session_id=session_id,
+             )
+ 
++        # dry_run=False is safe here: run_block's dry-run fast-path (line ~241)
++        # skips HITL entirely, so continue_run_block is never called during a
++        # dry run — only real executions reach the human review gate.
+         result = await execute_block(
+             block=block,
+             block_id=block_id,
+@@ -140,6 +146,7 @@ class ContinueRunBlockTool(BaseTool):
+             session_id=session_id,
+             node_exec_id=review_id,
+             matched_credentials=matched_creds,
++            dry_run=False,
+         )
+ 
+         # Delete review record after successful execution (one-time use)
+diff --git a/autogpt_platform/backend/backend/copilot/tools/helpers.py b/autogpt_platform/backend/backend/copilot/tools/helpers.py
+index 2cb276a86..5c25a3185 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/helpers.py
++++ b/autogpt_platform/backend/backend/copilot/tools/helpers.py
+@@ -21,6 +21,7 @@ from backend.data.credit import UsageTransactionMetadata
+ from backend.data.db_accessors import credit_db, review_db, workspace_db
+ from backend.data.execution import ExecutionContext
+ from backend.data.model import CredentialsFieldInfo, CredentialsMetaInput
++from backend.executor.simulator import simulate_block
+ from backend.executor.utils import block_usage_cost
+ from backend.integrations.creds_manager import IntegrationCredentialsManager
+ from backend.util.exceptions import BlockError, InsufficientBalanceError
+@@ -80,6 +81,7 @@ async def execute_block(
+     node_exec_id: str,
+     matched_credentials: dict[str, CredentialsMetaInput],
+     sensitive_action_safe_mode: bool = False,
++    dry_run: bool = False,
+ ) -> ToolResponseBase:
+     """Execute a block with full context setup, credential injection, and error handling.
+ 
+@@ -89,6 +91,49 @@ async def execute_block(
+     Returns:
+         BlockOutputResponse on success, ErrorResponse on failure.
+     """
++    # Dry-run path: simulate the block with an LLM, no real execution.
++    # HITL review is intentionally skipped — no real execution occurs.
++    if dry_run:
++        try:
++            # Coerce types to match the block's input schema, same as real execution.
++            # This ensures the simulated preview is consistent with real execution
++            # (e.g., "42" → 42, string booleans → bool, enum defaults applied).
++            coerce_inputs_to_schema(input_data, block.input_schema)
++            outputs: dict[str, list[Any]] = defaultdict(list)
++            async for output_name, output_data in simulate_block(block, input_data):
++                outputs[output_name].append(output_data)
++            # simulator signals internal failure via ("error", "[SIMULATOR ERROR …]")
++            sim_error = outputs.get("error", [])
++            if (
++                sim_error
++                and isinstance(sim_error[0], str)
++                and sim_error[0].startswith("[SIMULATOR ERROR")
++            ):
++                return ErrorResponse(
++                    message=sim_error[0],
++                    error=sim_error[0],
++                    session_id=session_id,
++                )
++            return BlockOutputResponse(
++                message=(
++                    f"[DRY RUN] Block '{block.name}' simulated successfully "
++                    "— no real execution occurred."
++                ),
++                block_id=block_id,
++                block_name=block.name,
++                outputs=dict(outputs),
++                success=True,
++                is_dry_run=True,
++                session_id=session_id,
++            )
++        except Exception as e:
++            logger.error("Dry-run simulation failed: %s", e, exc_info=True)
++            return ErrorResponse(
++                message=f"Dry-run simulation failed: {e}",
++                error=str(e),
++                session_id=session_id,
++            )
++
+     try:
+         workspace = await workspace_db().get_or_create_workspace(user_id)
+ 
+@@ -292,6 +337,7 @@ async def prepare_block_for_execution(
+     user_id: str,
+     session: ChatSession,
+     session_id: str,
++    dry_run: bool = False,
+ ) -> "BlockPreparation | ToolResponseBase":
+     """Validate and prepare a block for execution.
+ 
+@@ -379,7 +425,7 @@ async def prepare_block_for_execution(
+ 
+     credentials_fields = set(block.input_schema.get_credentials_fields().keys())
+ 
+-    if missing_credentials:
++    if missing_credentials and not dry_run:
+         credentials_fields_info = _resolve_discriminated_credentials(block, input_data)
+         missing_creds_dict = build_missing_credentials_from_field_info(
+             credentials_fields_info, set(matched_credentials.keys())
+@@ -560,8 +606,10 @@ def _resolve_discriminated_credentials(
+                 effective_field_info = field_info.discriminate(discriminator_value)
+                 effective_field_info.discriminator_values.add(discriminator_value)
+                 logger.debug(
+-                    f"Discriminated provider for {field_name}: "
+-                    f"{discriminator_value} -> {effective_field_info.provider}"
++                    "Discriminated provider for %s: %s -> %s",
++                    field_name,
++                    discriminator_value,
++                    effective_field_info.provider,
+                 )
+ 
+         resolved[field_name] = effective_field_info
+diff --git a/autogpt_platform/backend/backend/copilot/tools/models.py b/autogpt_platform/backend/backend/copilot/tools/models.py
+index 37402d2dc..a4919a5ed 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/models.py
++++ b/autogpt_platform/backend/backend/copilot/tools/models.py
+@@ -272,6 +272,7 @@ class ExecutionOutputInfo(BaseModel):
+     ended_at: datetime | None = None
+     outputs: dict[str, list[Any]]
+     inputs_summary: dict[str, Any] | None = None
++    node_executions: list[dict[str, Any]] | None = None
+ 
+ 
+ class AgentOutputResponse(ToolResponseBase):
+@@ -457,6 +458,7 @@ class BlockOutputResponse(ToolResponseBase):
+     block_name: str
+     outputs: dict[str, list[Any]]
+     success: bool = True
++    is_dry_run: bool = False
+ 
+ 
+ class ReviewRequiredResponse(ToolResponseBase):
+diff --git a/autogpt_platform/backend/backend/copilot/tools/run_agent.py b/autogpt_platform/backend/backend/copilot/tools/run_agent.py
+index 2625da1b2..479bb4e36 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/run_agent.py
++++ b/autogpt_platform/backend/backend/copilot/tools/run_agent.py
+@@ -71,6 +71,7 @@ class RunAgentInput(BaseModel):
+     cron: str = ""
+     timezone: str = "UTC"
+     wait_for_result: int = Field(default=0, ge=0, le=300)
++    dry_run: bool = False
+ 
+     @field_validator(
+         "username_agent_slug",
+@@ -150,6 +151,14 @@ class RunAgentTool(BaseTool):
+                     "minimum": 0,
+                     "maximum": 300,
+                 },
++                "dry_run": {
++                    "type": "boolean",
++                    "description": (
++                        "When true, simulates the entire agent execution using an LLM "
++                        "for each block — no real API calls, no credentials needed, "
++                        "no credits charged. Useful for testing agent wiring end-to-end."
++                    ),
++                },
+             },
+             "required": [],
+         }
+@@ -229,103 +238,17 @@ class RunAgentTool(BaseTool):
+                     session_id=session_id,
+                 )
+ 
+-            # Step 2: Check credentials
+-            graph_credentials, missing_creds = await match_user_credentials_to_graph(
+-                user_id, graph
++            # Step 2: Check credentials and inputs
++            graph_credentials, prereq_error = await self._check_prerequisites(
++                graph=graph,
++                user_id=user_id,
++                params=params,
++                session_id=session_id,
+             )
++            if prereq_error:
++                return prereq_error
+ 
+-            if missing_creds:
+-                # Return credentials needed response with input data info
+-                # The UI handles credential setup automatically, so the message
+-                # focuses on asking about input data
+-                requirements_creds_dict = build_missing_credentials_from_graph(
+-                    graph, None
+-                )
+-                missing_credentials_dict = build_missing_credentials_from_graph(
+-                    graph, graph_credentials
+-                )
+-                requirements_creds_list = list(requirements_creds_dict.values())
+-
+-                return SetupRequirementsResponse(
+-                    message=self._build_inputs_message(graph, MSG_WHAT_VALUES_TO_USE),
+-                    session_id=session_id,
+-                    setup_info=SetupInfo(
+-                        agent_id=graph.id,
+-                        agent_name=graph.name,
+-                        user_readiness=UserReadiness(
+-                            has_all_credentials=False,
+-                            missing_credentials=missing_credentials_dict,
+-                            ready_to_run=False,
+-                        ),
+-                        requirements={
+-                            "credentials": requirements_creds_list,
+-                            "inputs": get_inputs_from_schema(graph.input_schema),
+-                            "execution_modes": self._get_execution_modes(graph),
+-                        },
+-                    ),
+-                    graph_id=graph.id,
+-                    graph_version=graph.version,
+-                )
+-
+-            # Step 3: Check inputs
+-            # Get all available input fields from schema
+-            input_properties = graph.input_schema.get("properties", {})
+-            required_fields = set(graph.input_schema.get("required", []))
+-            provided_inputs = set(params.inputs.keys())
+-            valid_fields = set(input_properties.keys())
+-
+-            # Check for unknown input fields
+-            unrecognized_fields = provided_inputs - valid_fields
+-            if unrecognized_fields:
+-                return InputValidationErrorResponse(
+-                    message=(
+-                        f"Unknown input field(s) provided: {', '.join(sorted(unrecognized_fields))}. "
+-                        f"Agent was not executed. Please use the correct field names from the schema."
+-                    ),
+-                    session_id=session_id,
+-                    unrecognized_fields=sorted(unrecognized_fields),
+-                    inputs=graph.input_schema,
+-                    graph_id=graph.id,
+-                    graph_version=graph.version,
+-                )
+-
+-            # If agent has inputs but none were provided AND use_defaults is not set,
+-            # always show what's available first so user can decide
+-            if input_properties and not provided_inputs and not params.use_defaults:
+-                credentials = extract_credentials_from_schema(
+-                    graph.credentials_input_schema
+-                )
+-                return AgentDetailsResponse(
+-                    message=self._build_inputs_message(graph, MSG_ASK_USER_FOR_VALUES),
+-                    session_id=session_id,
+-                    agent=self._build_agent_details(graph, credentials),
+-                    user_authenticated=True,
+-                    graph_id=graph.id,
+-                    graph_version=graph.version,
+-                )
+-
+-            # Check if required inputs are missing (and not using defaults)
+-            missing_inputs = required_fields - provided_inputs
+-
+-            if missing_inputs and not params.use_defaults:
+-                # Return agent details with missing inputs info
+-                credentials = extract_credentials_from_schema(
+-                    graph.credentials_input_schema
+-                )
+-                return AgentDetailsResponse(
+-                    message=(
+-                        f"Agent '{graph.name}' is missing required inputs: "
+-                        f"{', '.join(missing_inputs)}. "
+-                        "Please provide these values to run the agent."
+-                    ),
+-                    session_id=session_id,
+-                    agent=self._build_agent_details(graph, credentials),
+-                    user_authenticated=True,
+-                    graph_id=graph.id,
+-                    graph_version=graph.version,
+-                )
+-
+-            # Step 4: Execute or Schedule
++            # Step 3: Execute or Schedule
+             if is_schedule:
+                 return await self._schedule_agent(
+                     user_id=user_id,
+@@ -345,6 +268,7 @@ class RunAgentTool(BaseTool):
+                     graph_credentials=graph_credentials,
+                     inputs=params.inputs,
+                     wait_for_result=params.wait_for_result,
++                    dry_run=params.dry_run,
+                 )
+ 
+         except NotFoundError as e:
+@@ -354,14 +278,14 @@ class RunAgentTool(BaseTool):
+                 session_id=session_id,
+             )
+         except DatabaseError as e:
+-            logger.error(f"Database error: {e}", exc_info=True)
++            logger.error("Database error: %s", e, exc_info=True)
+             return ErrorResponse(
+                 message=f"Failed to process request: {e!s}",
+                 error=str(e),
+                 session_id=session_id,
+             )
+         except Exception as e:
+-            logger.error(f"Error processing agent request: {e}", exc_info=True)
++            logger.error("Error processing agent request: %s", e, exc_info=True)
+             return ErrorResponse(
+                 message=f"Failed to process request: {e!s}",
+                 error=str(e),
+@@ -421,6 +345,112 @@ class RunAgentTool(BaseTool):
+             trigger_info=trigger_info,
+         )
+ 
++    async def _check_prerequisites(
++        self,
++        graph: GraphModel,
++        user_id: str,
++        params: "RunAgentInput",
++        session_id: str,
++    ) -> tuple[dict[str, CredentialsMetaInput], ToolResponseBase | None]:
++        """Validate credentials and inputs before execution.
++
++        Dry runs skip all prerequisite gates (credentials, input prompts)
++        since simulate_block doesn't need real credentials or complete inputs.
++
++        Returns:
++            (graph_credentials, error_response) — error_response is None when ready.
++        """
++        graph_credentials, missing_creds = await match_user_credentials_to_graph(
++            user_id, graph
++        )
++
++        # --- Reject unknown input fields (always, even for dry runs) ---
++        input_properties = graph.input_schema.get("properties", {})
++        provided_inputs = set(params.inputs.keys())
++        valid_fields = set(input_properties.keys())
++        unrecognized_fields = provided_inputs - valid_fields
++        if unrecognized_fields:
++            return graph_credentials, InputValidationErrorResponse(
++                message=(
++                    f"Unknown input field(s) provided: {', '.join(sorted(unrecognized_fields))}. "
++                    f"Agent was not executed. Please use the correct field names from the schema."
++                ),
++                session_id=session_id,
++                unrecognized_fields=sorted(unrecognized_fields),
++                inputs=graph.input_schema,
++                graph_id=graph.id,
++                graph_version=graph.version,
++            )
++
++        # Dry runs bypass remaining prerequisite gates (credentials, missing inputs)
++        if params.dry_run:
++            return graph_credentials, None
++
++        # --- Credential gate ---
++        if missing_creds:
++            requirements_creds_dict = build_missing_credentials_from_graph(graph, None)
++            missing_credentials_dict = build_missing_credentials_from_graph(
++                graph, graph_credentials
++            )
++            return graph_credentials, SetupRequirementsResponse(
++                message=self._build_inputs_message(graph, MSG_WHAT_VALUES_TO_USE),
++                session_id=session_id,
++                setup_info=SetupInfo(
++                    agent_id=graph.id,
++                    agent_name=graph.name,
++                    user_readiness=UserReadiness(
++                        has_all_credentials=False,
++                        missing_credentials=missing_credentials_dict,
++                        ready_to_run=False,
++                    ),
++                    requirements={
++                        "credentials": list(requirements_creds_dict.values()),
++                        "inputs": get_inputs_from_schema(graph.input_schema),
++                        "execution_modes": self._get_execution_modes(graph),
++                    },
++                ),
++                graph_id=graph.id,
++                graph_version=graph.version,
++            )
++
++        # --- Input gates ---
++        required_fields = set(graph.input_schema.get("required", []))
++
++        # Prompt user when inputs exist but none were provided
++        if input_properties and not provided_inputs and not params.use_defaults:
++            credentials = extract_credentials_from_schema(
++                graph.credentials_input_schema
++            )
++            return graph_credentials, AgentDetailsResponse(
++                message=self._build_inputs_message(graph, MSG_ASK_USER_FOR_VALUES),
++                session_id=session_id,
++                agent=self._build_agent_details(graph, credentials),
++                user_authenticated=True,
++                graph_id=graph.id,
++                graph_version=graph.version,
++            )
++
++        # Required inputs missing
++        missing_inputs = required_fields - provided_inputs
++        if missing_inputs and not params.use_defaults:
++            credentials = extract_credentials_from_schema(
++                graph.credentials_input_schema
++            )
++            return graph_credentials, AgentDetailsResponse(
++                message=(
++                    f"Agent '{graph.name}' is missing required inputs: "
++                    f"{', '.join(missing_inputs)}. "
++                    "Please provide these values to run the agent."
++                ),
++                session_id=session_id,
++                agent=self._build_agent_details(graph, credentials),
++                user_authenticated=True,
++                graph_id=graph.id,
++                graph_version=graph.version,
++            )
++
++        return graph_credentials, None
++
+     async def _run_agent(
+         self,
+         user_id: str,
+@@ -429,12 +459,16 @@ class RunAgentTool(BaseTool):
+         graph_credentials: dict[str, CredentialsMetaInput],
+         inputs: dict[str, Any],
+         wait_for_result: int = 0,
++        dry_run: bool = False,
+     ) -> ToolResponseBase:
+         """Execute an agent immediately, optionally waiting for completion."""
+         session_id = session.session_id
+ 
+-        # Check rate limits
+-        if session.successful_agent_runs.get(graph.id, 0) >= config.max_agent_runs:
++        # Check rate limits (dry runs don't count against the session limit)
++        if (
++            not dry_run
++            and session.successful_agent_runs.get(graph.id, 0) >= config.max_agent_runs
++        ):
+             return ErrorResponse(
+                 message="Maximum agent runs reached for this session. Please try again later.",
+                 session_id=session_id,
+@@ -449,12 +483,14 @@ class RunAgentTool(BaseTool):
+             user_id=user_id,
+             inputs=inputs,
+             graph_credentials_inputs=graph_credentials,
++            dry_run=dry_run,
+         )
+ 
+-        # Track successful run
+-        session.successful_agent_runs[library_agent.graph_id] = (
+-            session.successful_agent_runs.get(library_agent.graph_id, 0) + 1
+-        )
++        # Track successful run (dry runs don't count against the session limit)
++        if not dry_run:
++            session.successful_agent_runs[library_agent.graph_id] = (
++                session.successful_agent_runs.get(library_agent.graph_id, 0) + 1
++            )
+ 
+         # Track in PostHog
+         track_agent_run_success(
+diff --git a/autogpt_platform/backend/backend/copilot/tools/run_block.py b/autogpt_platform/backend/backend/copilot/tools/run_block.py
+index 399bf105c..a21f9fd23 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/run_block.py
++++ b/autogpt_platform/backend/backend/copilot/tools/run_block.py
+@@ -1,8 +1,10 @@
+ """Tool for executing blocks directly."""
+ 
+ import logging
++import uuid
+ from typing import Any
+ 
++from backend.copilot.constants import COPILOT_NODE_EXEC_ID_SEPARATOR
+ from backend.copilot.context import get_current_permissions
+ from backend.copilot.model import ChatSession
+ 
+@@ -47,6 +49,14 @@ class RunBlockTool(BaseTool):
+                     "type": "object",
+                     "description": "Input values. Use {} first to see schema.",
+                 },
++                "dry_run": {
++                    "type": "boolean",
++                    "description": (
++                        "When true, simulates block execution using an LLM without making any "
++                        "real API calls or producing side effects. Useful for testing agent "
++                        "wiring and previewing outputs. Default: false."
++                    ),
++                },
+             },
+             "required": ["block_id", "input_data"],
+         }
+@@ -76,6 +86,7 @@ class RunBlockTool(BaseTool):
+         """
+         block_id = kwargs.get("block_id", "").strip()
+         input_data = kwargs.get("input_data", {})
++        dry_run = bool(kwargs.get("dry_run", False))
+         session_id = session.session_id
+ 
+         if not block_id:
+@@ -104,6 +115,7 @@ class RunBlockTool(BaseTool):
+             user_id=user_id,
+             session=session,
+             session_id=session_id,
++            dry_run=dry_run,
+         )
+         if isinstance(prep_or_err, ToolResponseBase):
+             return prep_or_err
+@@ -130,6 +142,27 @@ class RunBlockTool(BaseTool):
+                 session_id=session_id,
+             )
+ 
++        # Dry-run fast-path: skip credential/HITL checks — simulation never calls
++        # the real service so credentials and review gates are not needed.
++        # Input field validation (unrecognized fields) is already handled by
++        # prepare_block_for_execution above.
++        if dry_run:
++            synthetic_node_exec_id = (
++                f"{prep.synthetic_node_id}"
++                f"{COPILOT_NODE_EXEC_ID_SEPARATOR}"
++                f"{uuid.uuid4().hex[:8]}"
++            )
++            return await execute_block(
++                block=prep.block,
++                block_id=block_id,
++                input_data=prep.input_data,
++                user_id=user_id,
++                session_id=session_id,
++                node_exec_id=synthetic_node_exec_id,
++                matched_credentials=prep.matched_credentials,
++                dry_run=True,
++            )
++
+         # Show block details when required inputs are not yet provided.
+         # This is run_block's two-step UX: first call returns the schema,
+         # second call (with inputs) actually executes.
+@@ -177,4 +210,5 @@ class RunBlockTool(BaseTool):
+             session_id=session_id,
+             node_exec_id=synthetic_node_exec_id,
+             matched_credentials=prep.matched_credentials,
++            dry_run=dry_run,
+         )
+diff --git a/autogpt_platform/backend/backend/copilot/tools/test_dry_run.py b/autogpt_platform/backend/backend/copilot/tools/test_dry_run.py
+new file mode 100644
+index 000000000..aea123c00
+--- /dev/null
++++ b/autogpt_platform/backend/backend/copilot/tools/test_dry_run.py
+@@ -0,0 +1,358 @@
++"""Tests for dry-run execution mode."""
++
++import inspect
++import json
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++import backend.copilot.tools.run_block as run_block_module
++from backend.copilot.tools.helpers import execute_block
++from backend.copilot.tools.models import BlockOutputResponse, ErrorResponse
++from backend.copilot.tools.run_block import RunBlockTool
++from backend.executor.simulator import build_simulation_prompt, simulate_block
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def make_mock_block(
++    name: str = "TestBlock",
++    description: str = "A test block",
++    input_props: dict | None = None,
++    output_props: dict | None = None,
++):
++    """Create a minimal mock block with jsonschema() methods."""
++    block = MagicMock()
++    block.name = name
++    block.description = description
++
++    in_props = input_props or {"query": {"type": "string"}}
++    out_props = output_props or {
++        "result": {"type": "string"},
++        "error": {"type": "string"},
++    }
++
++    block.input_schema = MagicMock()
++    block.input_schema.jsonschema.return_value = {
++        "type": "object",
++        "properties": in_props,
++        "required": list(in_props.keys()),
++    }
++    block.input_schema.get_credentials_fields.return_value = {}
++    block.input_schema.get_credentials_fields_info.return_value = {}
++
++    block.output_schema = MagicMock()
++    block.output_schema.jsonschema.return_value = {
++        "type": "object",
++        "properties": out_props,
++        "required": ["result"],
++    }
++
++    return block
++
++
++def make_openai_response(
++    content: str, prompt_tokens: int = 100, completion_tokens: int = 50
++):
++    """Build a mock OpenAI chat completion response."""
++    response = MagicMock()
++    response.choices = [MagicMock()]
++    response.choices[0].message.content = content
++    response.usage = MagicMock()
++    response.usage.prompt_tokens = prompt_tokens
++    response.usage.completion_tokens = completion_tokens
++    return response
++
++
++# ---------------------------------------------------------------------------
++# simulate_block tests
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_basic():
++    """simulate_block returns correct (output_name, output_data) tuples."""
++    mock_block = make_mock_block()
++    mock_client = AsyncMock()
++    mock_client.chat.completions.create = AsyncMock(
++        return_value=make_openai_response('{"result": "simulated output", "error": ""}')
++    )
++
++    with patch(
++        "backend.executor.simulator.get_openai_client", return_value=mock_client
++    ):
++        outputs = []
++        async for name, data in simulate_block(mock_block, {"query": "test"}):
++            outputs.append((name, data))
++
++    assert ("result", "simulated output") in outputs
++    assert ("error", "") in outputs
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_json_retry():
++    """LLM returns invalid JSON twice then valid; verifies 3 total calls."""
++    mock_block = make_mock_block()
++    mock_client = AsyncMock()
++    mock_client.chat.completions.create = AsyncMock(
++        side_effect=[
++            make_openai_response("not json at all"),
++            make_openai_response("still not json"),
++            make_openai_response('{"result": "ok", "error": ""}'),
++        ]
++    )
++
++    with patch(
++        "backend.executor.simulator.get_openai_client", return_value=mock_client
++    ):
++        outputs = []
++        async for name, data in simulate_block(mock_block, {"query": "test"}):
++            outputs.append((name, data))
++
++    assert mock_client.chat.completions.create.call_count == 3
++    assert ("result", "ok") in outputs
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_all_retries_exhausted():
++    """LLM always returns invalid JSON; verify error tuple is yielded."""
++    mock_block = make_mock_block()
++    mock_client = AsyncMock()
++    mock_client.chat.completions.create = AsyncMock(
++        return_value=make_openai_response("bad json !!!")
++    )
++
++    with patch(
++        "backend.executor.simulator.get_openai_client", return_value=mock_client
++    ):
++        outputs = []
++        async for name, data in simulate_block(mock_block, {"query": "test"}):
++            outputs.append((name, data))
++
++    # All retry attempts should have been consumed
++    assert mock_client.chat.completions.create.call_count == 5  # _MAX_JSON_RETRIES
++    assert len(outputs) == 1
++    name, data = outputs[0]
++    assert name == "error"
++    assert "[SIMULATOR ERROR" in data
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_missing_output_pins():
++    """LLM response missing some output pins; verify they're filled with None."""
++    mock_block = make_mock_block(
++        output_props={
++            "result": {"type": "string"},
++            "count": {"type": "integer"},
++            "error": {"type": "string"},
++        }
++    )
++    mock_client = AsyncMock()
++    # Only returns "result", missing "count" and "error"
++    mock_client.chat.completions.create = AsyncMock(
++        return_value=make_openai_response('{"result": "hello"}')
++    )
++
++    with patch(
++        "backend.executor.simulator.get_openai_client", return_value=mock_client
++    ):
++        outputs = {}
++        async for name, data in simulate_block(mock_block, {"query": "hi"}):
++            outputs[name] = data
++
++    assert outputs["result"] == "hello"
++    assert outputs["count"] is None  # missing pin filled with None
++    assert outputs["error"] == ""  # "error" pin filled with ""
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_no_client():
++    """When no OpenAI client is available, yields SIMULATOR ERROR."""
++    mock_block = make_mock_block()
++
++    with patch("backend.executor.simulator.get_openai_client", return_value=None):
++        outputs = []
++        async for name, data in simulate_block(mock_block, {}):
++            outputs.append((name, data))
++
++    assert len(outputs) == 1
++    name, data = outputs[0]
++    assert name == "error"
++    assert "[SIMULATOR ERROR" in data
++
++
++@pytest.mark.asyncio
++async def test_simulate_block_truncates_long_inputs():
++    """Inputs with very long strings should be truncated in the prompt."""
++    mock_block = make_mock_block(input_props={"text": {"type": "string"}})
++    long_text = "x" * 30000  # 30k chars, above the 20k threshold
++
++    system_prompt, user_prompt = build_simulation_prompt(
++        mock_block, {"text": long_text}
++    )
++
++    # The user prompt should contain TRUNCATED marker
++    assert "[TRUNCATED]" in user_prompt
++    # And the total length of the value in the prompt should be well under 30k chars
++    parsed = json.loads(user_prompt.split("## Current Inputs\n", 1)[1])
++    assert len(parsed["text"]) < 25000
++
++
++# ---------------------------------------------------------------------------
++# execute_block dry-run tests
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_execute_block_dry_run_skips_real_execution():
++    """execute_block(dry_run=True) calls simulate_block, NOT block.execute."""
++    mock_block = make_mock_block()
++    mock_block.execute = AsyncMock()  # should NOT be called
++
++    async def fake_simulate(block, input_data):
++        yield "result", "simulated"
++
++    # Patching at helpers.simulate_block works because helpers.py imports
++    # simulate_block at the top of the module. If the import were lazy
++    # (inside the function), we'd need to patch the source module instead.
++    with patch(
++        "backend.copilot.tools.helpers.simulate_block", side_effect=fake_simulate
++    ):
++        response = await execute_block(
++            block=mock_block,
++            block_id="test-block-id",
++            input_data={"query": "hello"},
++            user_id="user-1",
++            session_id="session-1",
++            node_exec_id="node-exec-1",
++            matched_credentials={},
++            dry_run=True,
++        )
++
++    mock_block.execute.assert_not_called()
++    assert isinstance(response, BlockOutputResponse)
++    assert response.success is True
++
++
++@pytest.mark.asyncio
++async def test_execute_block_dry_run_response_format():
++    """Dry-run response should contain [DRY RUN] in message and success=True."""
++    mock_block = make_mock_block()
++
++    async def fake_simulate(block, input_data):
++        yield "result", "simulated"
++
++    with patch(
++        "backend.copilot.tools.helpers.simulate_block", side_effect=fake_simulate
++    ):
++        response = await execute_block(
++            block=mock_block,
++            block_id="test-block-id",
++            input_data={"query": "hello"},
++            user_id="user-1",
++            session_id="session-1",
++            node_exec_id="node-exec-1",
++            matched_credentials={},
++            dry_run=True,
++        )
++
++    assert isinstance(response, BlockOutputResponse)
++    assert "[DRY RUN]" in response.message
++    assert response.success is True
++    assert response.outputs == {"result": ["simulated"]}
++
++
++@pytest.mark.asyncio
++async def test_execute_block_real_execution_unchanged():
++    """dry_run=False should still go through the real execution path."""
++    mock_block = make_mock_block()
++
++    # We expect it to hit the real path, which will fail on workspace_db() call.
++    # Just verify simulate_block is NOT called.
++    simulate_called = False
++
++    async def fake_simulate(block, input_data):
++        nonlocal simulate_called
++        simulate_called = True
++        yield "result", "should not happen"
++
++    with patch(
++        "backend.copilot.tools.helpers.simulate_block", side_effect=fake_simulate
++    ):
++        with patch(
++            "backend.copilot.tools.helpers.workspace_db",
++            side_effect=Exception("db not available"),
++        ):
++            response = await execute_block(
++                block=mock_block,
++                block_id="test-block-id",
++                input_data={"query": "hello"},
++                user_id="user-1",
++                session_id="session-1",
++                node_exec_id="node-exec-1",
++                matched_credentials={},
++                dry_run=False,
++            )
++
++    assert simulate_called is False
++    # The real path raised an exception, so we get an ErrorResponse (which has .error attr)
++    assert hasattr(response, "error")
++
++
++# ---------------------------------------------------------------------------
++# RunBlockTool parameter tests
++# ---------------------------------------------------------------------------
++
++
++def test_run_block_tool_dry_run_param():
++    """RunBlockTool parameters should include 'dry_run'."""
++    tool = RunBlockTool()
++    params = tool.parameters
++    assert "dry_run" in params["properties"]
++    assert params["properties"]["dry_run"]["type"] == "boolean"
++
++
++def test_run_block_tool_dry_run_calls_execute():
++    """RunBlockTool._execute extracts dry_run from kwargs correctly.
++
++    We verify the extraction logic directly by inspecting the source, then confirm
++    the kwarg is forwarded in the execute_block call site.
++    """
++    source = inspect.getsource(run_block_module.RunBlockTool._execute)
++    # Verify dry_run is extracted from kwargs
++    assert "dry_run" in source
++    assert 'kwargs.get("dry_run"' in source
++
++    # Scope to _execute method source only — module-wide search is brittle
++    # and can match unrelated text/comments.
++    source_execute = inspect.getsource(run_block_module.RunBlockTool._execute)
++    # Verify dry_run is passed through to execute_block call
++    assert "dry_run=dry_run" in source_execute
++
++
++@pytest.mark.asyncio
++async def test_execute_block_dry_run_simulator_error_returns_error_response():
++    """When simulate_block yields a SIMULATOR ERROR tuple, execute_block returns ErrorResponse."""
++    mock_block = make_mock_block()
++
++    async def fake_simulate_error(block, input_data):
++        yield "error", "[SIMULATOR ERROR — NOT A BLOCK FAILURE] No LLM client available (missing OpenAI/OpenRouter API key)."
++
++    with patch(
++        "backend.copilot.tools.helpers.simulate_block", side_effect=fake_simulate_error
++    ):
++        response = await execute_block(
++            block=mock_block,
++            block_id="test-block-id",
++            input_data={"query": "hello"},
++            user_id="user-1",
++            session_id="session-1",
++            node_exec_id="node-exec-1",
++            matched_credentials={},
++            dry_run=True,
++        )
++
++    assert isinstance(response, ErrorResponse)
++    assert "[SIMULATOR ERROR" in response.message
+diff --git a/autogpt_platform/backend/backend/data/execution.py b/autogpt_platform/backend/backend/data/execution.py
+index 3b1b8cbf0..46f8d88c8 100644
+--- a/autogpt_platform/backend/backend/data/execution.py
++++ b/autogpt_platform/backend/backend/data/execution.py
+@@ -89,6 +89,7 @@ class ExecutionContext(BaseModel):
+     # Safety settings
+     human_in_the_loop_safe_mode: bool = True
+     sensitive_action_safe_mode: bool = False
++    dry_run: bool = False  # When True, blocks are LLM-simulated, no real execution
+ 
+     # User settings
+     user_timezone: str = "UTC"
+@@ -178,6 +179,7 @@ class GraphExecutionMeta(BaseDbModel):
+     )
+     is_shared: bool = False
+     share_token: Optional[str] = None
++    is_dry_run: bool = False
+ 
+     class Stats(BaseModel):
+         model_config = ConfigDict(
+@@ -306,6 +308,7 @@ class GraphExecutionMeta(BaseDbModel):
+             ),
+             is_shared=_graph_exec.isShared,
+             share_token=_graph_exec.shareToken,
++            is_dry_run=stats.is_dry_run if stats else False,
+         )
+ 
+ 
+@@ -718,11 +721,12 @@ async def create_graph_execution(
+     graph_version: int,
+     starting_nodes_input: list[tuple[str, BlockInput]],  # list[(node_id, BlockInput)]
+     inputs: Mapping[str, JsonValue],
+-    user_id: str,
++    user_id: str,  # Validated by callers (API auth layer / service-level checks)
+     preset_id: Optional[str] = None,
+     credential_inputs: Optional[Mapping[str, CredentialsMetaInput]] = None,
+     nodes_input_masks: Optional[NodesInputMasks] = None,
+     parent_graph_exec_id: Optional[str] = None,
++    is_dry_run: bool = False,
+ ) -> GraphExecutionWithNodes:
+     """
+     Create a new AgentGraphExecution record.
+@@ -760,6 +764,7 @@ async def create_graph_execution(
+             "userId": user_id,
+             "agentPresetId": preset_id,
+             "parentGraphExecutionId": parent_graph_exec_id,
++            **({"stats": Json({"is_dry_run": True})} if is_dry_run else {}),
+         },
+         include=GRAPH_EXECUTION_INCLUDE_WITH_NODES,
+     )
+diff --git a/autogpt_platform/backend/backend/data/model.py b/autogpt_platform/backend/backend/data/model.py
+index c9d8c5879..f8256eb55 100644
+--- a/autogpt_platform/backend/backend/data/model.py
++++ b/autogpt_platform/backend/backend/data/model.py
+@@ -889,6 +889,10 @@ class GraphExecutionStats(BaseModel):
+         default=None,
+         description="AI-generated score (0.0-1.0) indicating how well the execution achieved its intended purpose",
+     )
++    is_dry_run: bool = Field(
++        default=False,
++        description="Whether this execution was a dry-run simulation",
++    )
+ 
+ 
+ class UserExecutionSummaryStats(BaseModel):
+diff --git a/autogpt_platform/backend/backend/executor/manager.py b/autogpt_platform/backend/backend/executor/manager.py
+index d4eb50c8e..f7c29bb04 100644
+--- a/autogpt_platform/backend/backend/executor/manager.py
++++ b/autogpt_platform/backend/backend/executor/manager.py
+@@ -81,6 +81,7 @@ from backend.util.settings import Settings
+ from .activity_status_generator import generate_activity_status_for_execution
+ from .automod.manager import automod_manager
+ from .cluster_lock import ClusterLock
++from .simulator import simulate_block
+ from .utils import (
+     GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
+     GRAPH_EXECUTION_CANCEL_QUEUE_NAME,
+@@ -222,7 +223,9 @@ async def execute_node(
+         raise ValueError(f"Block {node_block.id} is disabled and cannot be executed")
+ 
+     # Sanity check: validate the execution input.
+-    input_data, error = validate_exec(node, data.inputs, resolve_input=False)
++    input_data, error = validate_exec(
++        node, data.inputs, resolve_input=False, dry_run=execution_context.dry_run
++    )
+     if input_data is None:
+         log_metadata.warning(f"Skip execution, input validation error: {error}")
+         yield "error", error
+@@ -372,9 +375,12 @@ async def execute_node(
+         scope.set_tag(f"execution_context.{k}", v)
+ 
+     try:
+-        async for output_name, output_data in node_block.execute(
+-            input_data, **extra_exec_kwargs
+-        ):
++        if execution_context.dry_run:
++            block_iter = simulate_block(node_block, input_data)
++        else:
++            block_iter = node_block.execute(input_data, **extra_exec_kwargs)
++
++        async for output_name, output_data in block_iter:
+             output_data = json.to_dict(output_data)
+             output_size += len(json.dumps(output_data))
+             log_metadata.debug("Node produced output", **{output_name: output_data})
+@@ -506,7 +512,9 @@ async def _enqueue_next_nodes(
+                 next_node_input.update(node_input_mask)
+ 
+             # Validate the input data for the next node.
+-            next_node_input, validation_msg = validate_exec(next_node, next_node_input)
++            next_node_input, validation_msg = validate_exec(
++                next_node, next_node_input, dry_run=execution_context.dry_run
++            )
+             suffix = f"{next_output_name}>{next_input_name}~{next_node_exec_id}:{validation_msg}"
+ 
+             # Incomplete input data, skip queueing the execution.
+@@ -551,7 +559,9 @@ async def _enqueue_next_nodes(
+                 if node_input_mask:
+                     idata.update(node_input_mask)
+ 
+-                idata, msg = validate_exec(next_node, idata)
++                idata, msg = validate_exec(
++                    next_node, idata, dry_run=execution_context.dry_run
++                )
+                 suffix = f"{next_output_name}>{next_input_name}~{ineid}:{msg}"
+                 if not idata:
+                     log_metadata.info(f"Enqueueing static-link skipped: {suffix}")
+@@ -829,9 +839,12 @@ class ExecutionProcessor:
+             return
+ 
+         if exec_meta.stats is None:
+-            exec_stats = GraphExecutionStats()
++            exec_stats = GraphExecutionStats(
++                is_dry_run=graph_exec.execution_context.dry_run,
++            )
+         else:
+             exec_stats = exec_meta.stats.to_db()
++            exec_stats.is_dry_run = graph_exec.execution_context.dry_run
+ 
+         timing_info, status = self._on_graph_execution(
+             graph_exec=graph_exec,
+@@ -971,7 +984,10 @@ class ExecutionProcessor:
+         running_node_evaluation = self.running_node_evaluation
+ 
+         try:
+-            if db_client.get_credits(graph_exec.user_id) <= 0:
++            if (
++                not graph_exec.execution_context.dry_run
++                and db_client.get_credits(graph_exec.user_id) <= 0
++            ):
+                 raise InsufficientBalanceError(
+                     user_id=graph_exec.user_id,
+                     message="You have no credits left to run an agent.",
+@@ -1042,21 +1058,24 @@ class ExecutionProcessor:
+                     f"for node {queued_node_exec.node_id}",
+                 )
+ 
+-                # Charge usage (may raise) ------------------------------
++                # Charge usage (may raise) — skipped for dry runs
+                 try:
+-                    cost, remaining_balance = self._charge_usage(
+-                        node_exec=queued_node_exec,
+-                        execution_count=increment_execution_count(graph_exec.user_id),
+-                    )
+-                    with execution_stats_lock:
+-                        execution_stats.cost += cost
+-                    # Check if we crossed the low balance threshold
+-                    self._handle_low_balance(
+-                        db_client=db_client,
+-                        user_id=graph_exec.user_id,
+-                        current_balance=remaining_balance,
+-                        transaction_cost=cost,
+-                    )
++                    if not graph_exec.execution_context.dry_run:
++                        cost, remaining_balance = self._charge_usage(
++                            node_exec=queued_node_exec,
++                            execution_count=increment_execution_count(
++                                graph_exec.user_id
++                            ),
++                        )
++                        with execution_stats_lock:
++                            execution_stats.cost += cost
++                        # Check if we crossed the low balance threshold
++                        self._handle_low_balance(
++                            db_client=db_client,
++                            user_id=graph_exec.user_id,
++                            current_balance=remaining_balance,
++                            transaction_cost=cost,
++                        )
+                 except InsufficientBalanceError as balance_error:
+                     error = balance_error  # Set error to trigger FAILED status
+                     node_exec_id = queued_node_exec.node_exec_id
+diff --git a/autogpt_platform/backend/backend/executor/simulator.py b/autogpt_platform/backend/backend/executor/simulator.py
+new file mode 100644
+index 000000000..9d35cf1e2
+--- /dev/null
++++ b/autogpt_platform/backend/backend/executor/simulator.py
+@@ -0,0 +1,218 @@
++"""
++LLM-powered block simulator for dry-run execution.
++
++When dry_run=True, instead of calling the real block, this module
++role-plays the block's execution using an LLM. No real API calls,
++no side effects. The LLM is grounded by:
++  - Block name and description
++  - Input/output schemas (from block.input_schema.jsonschema() / output_schema.jsonschema())
++  - The actual input values
++
++Inspired by https://github.com/Significant-Gravitas/agent-simulator
++"""
++
++import json
++import logging
++from collections.abc import AsyncIterator
++from typing import Any
++
++from backend.util.clients import get_openai_client
++
++logger = logging.getLogger(__name__)
++
++
++# Use the same fast/cheap model the copilot uses for non-primary tasks.
++# Overridable via ChatConfig.title_model if ChatConfig is available.
++def _simulator_model() -> str:
++    try:
++        from backend.copilot.config import ChatConfig  # noqa: PLC0415
++
++        model = ChatConfig().title_model
++    except Exception:
++        model = "openai/gpt-4o-mini"
++
++    # get_openai_client() may return a direct OpenAI client (not OpenRouter).
++    # Direct OpenAI expects bare model names ("gpt-4o-mini"), not the
++    # OpenRouter-prefixed form ("openai/gpt-4o-mini").  Strip the prefix when
++    # the internal OpenAI key is configured (i.e. not going through OpenRouter).
++    try:
++        from backend.util.settings import Settings  # noqa: PLC0415
++
++        secrets = Settings().secrets
++        # get_openai_client() uses the direct OpenAI client whenever
++        # openai_internal_api_key is set, regardless of open_router_api_key.
++        # Strip the provider prefix (e.g. "openai/gpt-4o-mini" → "gpt-4o-mini")
++        # so the model name is valid for the direct OpenAI API.
++        if secrets.openai_internal_api_key and "/" in model:
++            model = model.split("/", 1)[1]
++    except Exception:
++        pass
++
++    return model
++
++
++_TEMPERATURE = 0.2
++_MAX_JSON_RETRIES = 5
++_MAX_INPUT_VALUE_CHARS = 20000
++
++
++def _truncate_value(value: Any) -> Any:
++    """Recursively truncate long strings anywhere in a value."""
++    if isinstance(value, str):
++        return (
++            value[:_MAX_INPUT_VALUE_CHARS] + "... [TRUNCATED]"
++            if len(value) > _MAX_INPUT_VALUE_CHARS
++            else value
++        )
++    if isinstance(value, dict):
++        return {k: _truncate_value(v) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_truncate_value(item) for item in value]
++    return value
++
++
++def _truncate_input_values(input_data: dict[str, Any]) -> dict[str, Any]:
++    """Recursively truncate long string values so the prompt doesn't blow up."""
++    return {k: _truncate_value(v) for k, v in input_data.items()}
++
++
++def _describe_schema_pins(schema: dict[str, Any]) -> str:
++    """Format output pins as a bullet list for the prompt."""
++    properties = schema.get("properties", {})
++    required = set(schema.get("required", []))
++    lines = []
++    for pin_name, pin_schema in properties.items():
++        pin_type = pin_schema.get("type", "any")
++        req = "required" if pin_name in required else "optional"
++        lines.append(f"- {pin_name}: {pin_type} ({req})")
++    return "\n".join(lines) if lines else "(no output pins defined)"
++
++
++def build_simulation_prompt(block: Any, input_data: dict[str, Any]) -> tuple[str, str]:
++    """Build (system_prompt, user_prompt) for block simulation."""
++    input_schema = block.input_schema.jsonschema()
++    output_schema = block.output_schema.jsonschema()
++
++    input_pins = _describe_schema_pins(input_schema)
++    output_pins = _describe_schema_pins(output_schema)
++    output_properties = list(output_schema.get("properties", {}).keys())
++
++    block_name = getattr(block, "name", type(block).__name__)
++    block_description = getattr(block, "description", "No description available.")
++
++    system_prompt = f"""You are simulating the execution of a software block called "{block_name}".
++
++## Block Description
++{block_description}
++
++## Input Schema
++{input_pins}
++
++## Output Schema (what you must return)
++{output_pins}
++
++Your task: given the current inputs, produce realistic simulated outputs for this block.
++
++Rules:
++- Respond with a single JSON object whose keys are EXACTLY the output pin names listed above.
++- Assume all credentials and authentication are present and valid. Never simulate authentication failures.
++- Make the simulated outputs realistic and consistent with the inputs.
++- If there is an "error" pin, set it to "" (empty string) unless you are simulating a logical error.
++- Do not include any extra keys beyond the output pins.
++
++Output pin names you MUST include: {json.dumps(output_properties)}
++"""
++
++    safe_inputs = _truncate_input_values(input_data)
++    user_prompt = f"## Current Inputs\n{json.dumps(safe_inputs, indent=2)}"
++
++    return system_prompt, user_prompt
++
++
++async def simulate_block(
++    block: Any,
++    input_data: dict[str, Any],
++) -> AsyncIterator[tuple[str, Any]]:
++    """Simulate block execution using an LLM.
++
++    Yields (output_name, output_data) tuples matching the Block.execute() interface.
++    On unrecoverable failure, yields a single ("error", "[SIMULATOR ERROR ...") tuple.
++    """
++    client = get_openai_client()
++    if client is None:
++        yield (
++            "error",
++            "[SIMULATOR ERROR — NOT A BLOCK FAILURE] No LLM client available "
++            "(missing OpenAI/OpenRouter API key).",
++        )
++        return
++
++    output_schema = block.output_schema.jsonschema()
++    output_properties: dict[str, Any] = output_schema.get("properties", {})
++
++    system_prompt, user_prompt = build_simulation_prompt(block, input_data)
++
++    model = _simulator_model()
++    last_error: Exception | None = None
++    for attempt in range(_MAX_JSON_RETRIES):
++        try:
++            response = await client.chat.completions.create(
++                model=model,
++                temperature=_TEMPERATURE,
++                response_format={"type": "json_object"},
++                messages=[
++                    {"role": "system", "content": system_prompt},
++                    {"role": "user", "content": user_prompt},
++                ],
++            )
++            if not response.choices:
++                raise ValueError("LLM returned empty choices array")
++            raw = response.choices[0].message.content or ""
++            parsed = json.loads(raw)
++            if not isinstance(parsed, dict):
++                raise ValueError(f"LLM returned non-object JSON: {raw[:200]}")
++
++            # Fill missing output pins with defaults
++            result: dict[str, Any] = {}
++            for pin_name in output_properties:
++                if pin_name in parsed:
++                    result[pin_name] = parsed[pin_name]
++                else:
++                    result[pin_name] = "" if pin_name == "error" else None
++
++            logger.debug(
++                "simulate_block: block=%s attempt=%d tokens=%s/%s",
++                getattr(block, "name", "?"),
++                attempt + 1,
++                getattr(getattr(response, "usage", None), "prompt_tokens", "?"),
++                getattr(getattr(response, "usage", None), "completion_tokens", "?"),
++            )
++
++            for pin_name, pin_value in result.items():
++                yield pin_name, pin_value
++            return
++
++        except (json.JSONDecodeError, ValueError) as e:
++            last_error = e
++            logger.warning(
++                "simulate_block: JSON parse error on attempt %d/%d: %s",
++                attempt + 1,
++                _MAX_JSON_RETRIES,
++                e,
++            )
++        except Exception as e:
++            last_error = e
++            logger.error("simulate_block: LLM call failed: %s", e, exc_info=True)
++            break
++
++    logger.error(
++        "simulate_block: all %d retries exhausted for block=%s; last_error=%s",
++        _MAX_JSON_RETRIES,
++        getattr(block, "name", "?"),
++        last_error,
++    )
++    yield (
++        "error",
++        f"[SIMULATOR ERROR — NOT A BLOCK FAILURE] Failed after {_MAX_JSON_RETRIES} "
++        f"attempts: {last_error}",
++    )
+diff --git a/autogpt_platform/backend/backend/executor/utils.py b/autogpt_platform/backend/backend/executor/utils.py
+index cb3548944..31a165221 100644
+--- a/autogpt_platform/backend/backend/executor/utils.py
++++ b/autogpt_platform/backend/backend/executor/utils.py
+@@ -181,6 +181,7 @@ def validate_exec(
+     node: Node,
+     data: BlockInput,
+     resolve_input: bool = True,
++    dry_run: bool = False,
+ ) -> tuple[BlockInput | None, str]:
+     """
+     Validate the input data for a node execution.
+@@ -189,6 +190,9 @@ def validate_exec(
+         node: The node to execute.
+         data: The input data for the node execution.
+         resolve_input: Whether to resolve dynamic pins into dict/list/object.
++        dry_run: When True, credential fields are allowed to be missing — they
++            will be substituted with a sentinel so the node can be queued and
++            later executed via simulate_block.
+ 
+     Returns:
+         A tuple of the validated data and the block name.
+@@ -207,6 +211,14 @@ def validate_exec(
+     if missing_links := schema.get_missing_links(data, node.input_links):
+         return None, f"{error_prefix} unpopulated links {missing_links}"
+ 
++    # For dry runs, supply sentinel values for any missing credential fields so
++    # the node can be queued — simulate_block never calls the real API anyway.
++    if dry_run:
++        cred_field_names = set(schema.get_credentials_fields().keys())
++        for field_name in cred_field_names:
++            if field_name not in data:
++                data = {**data, field_name: None}
++
+     # Merge input data with default values and resolve dynamic dict/list/object pins.
+     input_default = schema.get_input_defaults(node.input_default)
+     data = {**input_default, **data}
+@@ -218,13 +230,21 @@ def validate_exec(
+ 
+     # Input data post-merge should contain all required fields from the schema.
+     if missing_input := schema.get_missing_input(data):
+-        return None, f"{error_prefix} missing input {missing_input}"
++        if dry_run:
++            # In dry-run mode all missing inputs are tolerated — simulate_block()
++            # generates synthetic outputs without needing real input values.
++            pass
++        else:
++            return None, f"{error_prefix} missing input {missing_input}"
+ 
+     # Last validation: Validate the input values against the schema.
+-    if error := schema.get_mismatch_error(data):
+-        error_message = f"{error_prefix} {error}"
+-        logger.warning(error_message)
+-        return None, error_message
++    # Skip for dry runs — simulate_block doesn't use real inputs, and sentinel
++    # credential values (None) would fail JSON-schema type/required checks.
++    if not dry_run:
++        if error := schema.get_mismatch_error(data):
++            error_message = f"{error_prefix} {error}"
++            logger.warning(error_message)
++            return None, error_message
+ 
+     return data, node_block.name
+ 
+@@ -427,6 +447,7 @@ async def _construct_starting_node_execution_input(
+     user_id: str,
+     graph_inputs: GraphInput,
+     nodes_input_masks: Optional[NodesInputMasks] = None,
++    dry_run: bool = False,
+ ) -> tuple[list[tuple[str, BlockInput]], set[str]]:
+     """
+     Validates and prepares the input data for executing a graph.
+@@ -439,6 +460,7 @@ async def _construct_starting_node_execution_input(
+         user_id (str): The ID of the user executing the graph.
+         data (GraphInput): The input data for the graph execution.
+         node_credentials_map: `dict[node_id, dict[input_name, CredentialsMetaInput]]`
++        dry_run: When True, skip credential validation errors (simulation needs no real creds).
+ 
+     Returns:
+         tuple[
+@@ -451,6 +473,32 @@ async def _construct_starting_node_execution_input(
+     validation_errors, nodes_to_skip = await validate_graph_with_credentials(
+         graph, user_id, nodes_input_masks
+     )
++    # Dry runs simulate every block — missing credentials are irrelevant.
++    # Strip credential-only errors so the graph can proceed.
++    if dry_run and validation_errors:
++
++        def _is_credential_error(msg: str) -> bool:
++            """Match errors produced by _validate_node_input_credentials."""
++            m = msg.lower()
++            return (
++                m == "these credentials are required"
++                or m.startswith("invalid credentials:")
++                or m.startswith("credentials not available:")
++                or m.startswith("unknown credentials #")
++            )
++
++        validation_errors = {
++            node_id: {
++                field: msg
++                for field, msg in errors.items()
++                if not _is_credential_error(msg)
++            }
++            for node_id, errors in validation_errors.items()
++        }
++        # Remove nodes that have no remaining errors
++        validation_errors = {
++            node_id: errors for node_id, errors in validation_errors.items() if errors
++        }
+     n_error_nodes = len(validation_errors)
+     n_errors = sum(len(errors) for errors in validation_errors.values())
+     if validation_errors:
+@@ -494,7 +542,7 @@ async def _construct_starting_node_execution_input(
+                 "Please use the appropriate trigger to run this agent."
+             )
+ 
+-        input_data, error = validate_exec(node, input_data)
++        input_data, error = validate_exec(node, input_data, dry_run=dry_run)
+         if input_data is None:
+             raise ValueError(error)
+         else:
+@@ -516,6 +564,7 @@ async def validate_and_construct_node_execution_input(
+     graph_credentials_inputs: Optional[Mapping[str, CredentialsMetaInput]] = None,
+     nodes_input_masks: Optional[NodesInputMasks] = None,
+     is_sub_graph: bool = False,
++    dry_run: bool = False,
+ ) -> tuple[GraphModel, list[tuple[str, BlockInput]], NodesInputMasks, set[str]]:
+     """
+     Public wrapper that handles graph fetching, credential mapping, and validation+construction.
+@@ -581,6 +630,7 @@ async def validate_and_construct_node_execution_input(
+             user_id=user_id,
+             graph_inputs=graph_inputs,
+             nodes_input_masks=nodes_input_masks,
++            dry_run=dry_run,
+         )
+     )
+ 
+@@ -818,6 +868,7 @@ async def add_graph_execution(
+     nodes_input_masks: Optional[NodesInputMasks] = None,
+     execution_context: Optional[ExecutionContext] = None,
+     graph_exec_id: Optional[str] = None,
++    dry_run: bool = False,
+ ) -> GraphExecutionWithNodes:
+     """
+     Adds a graph execution to the queue and returns the execution entry.
+@@ -882,6 +933,7 @@ async def add_graph_execution(
+                 graph_credentials_inputs=graph_credentials_inputs,
+                 nodes_input_masks=nodes_input_masks,
+                 is_sub_graph=parent_exec_id is not None,
++                dry_run=dry_run,
+             )
+         )
+ 
+@@ -895,6 +947,7 @@ async def add_graph_execution(
+             starting_nodes_input=starting_nodes_input,
+             preset_id=preset_id,
+             parent_graph_exec_id=parent_exec_id,
++            is_dry_run=dry_run,
+         )
+ 
+         logger.info(
+@@ -917,6 +970,7 @@ async def add_graph_execution(
+             # Safety settings
+             human_in_the_loop_safe_mode=settings.human_in_the_loop_safe_mode,
+             sensitive_action_safe_mode=settings.sensitive_action_safe_mode,
++            dry_run=dry_run,
+             # User settings
+             user_timezone=(
+                 user.timezone if user.timezone != USER_TIMEZONE_NOT_SET else "UTC"
+diff --git a/autogpt_platform/backend/backend/executor/utils_test.py b/autogpt_platform/backend/backend/executor/utils_test.py
+index 6ddde85b8..57069352f 100644
+--- a/autogpt_platform/backend/backend/executor/utils_test.py
++++ b/autogpt_platform/backend/backend/executor/utils_test.py
+@@ -425,6 +425,7 @@ async def test_add_graph_execution_is_repeatable(mocker: MockerFixture):
+         starting_nodes_input=starting_nodes_input,
+         preset_id=preset_id,
+         parent_graph_exec_id=None,
++        is_dry_run=False,
+     )
+ 
+     # Set up the graph execution mock to have properties we can extract
+diff --git a/autogpt_platform/frontend/src/app/(platform)/build/__tests__/RunGraph.test.tsx b/autogpt_platform/frontend/src/app/(platform)/build/__tests__/RunGraph.test.tsx
+index a6888b9d4..9337ad872 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/build/__tests__/RunGraph.test.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/build/__tests__/RunGraph.test.tsx
+@@ -51,6 +51,13 @@ function renderRunGraph(flowID: string | null = "test-flow-id") {
+   );
+ }
+ 
++/** Get the primary Run/Stop button by its data-id attribute. */
++function getButtonByDataId(dataId: string): HTMLButtonElement {
++  const el = document.querySelector<HTMLButtonElement>(`[data-id="${dataId}"]`);
++  if (!el) throw new Error(`Button with data-id="${dataId}" not found`);
++  return el;
++}
++
+ describe("RunGraph", () => {
+   beforeEach(() => {
+     cleanup();
+@@ -64,14 +71,12 @@ describe("RunGraph", () => {
+ 
+   it("renders an enabled button when flowID is provided", () => {
+     renderRunGraph("test-flow-id");
+-    const button = screen.getByRole("button");
+-    expect((button as HTMLButtonElement).disabled).toBe(false);
++    expect(getButtonByDataId("run-graph-button").disabled).toBe(false);
+   });
+ 
+   it("renders a disabled button when flowID is null", () => {
+     renderRunGraph(null);
+-    const button = screen.getByRole("button");
+-    expect((button as HTMLButtonElement).disabled).toBe(true);
++    expect(getButtonByDataId("run-graph-button").disabled).toBe(true);
+   });
+ 
+   it("disables the button when isExecutingGraph is true", () => {
+@@ -79,9 +84,7 @@ describe("RunGraph", () => {
+       createMockReturnValue({ isExecutingGraph: true }),
+     );
+     renderRunGraph();
+-    expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(
+-      true,
+-    );
++    expect(getButtonByDataId("run-graph-button").disabled).toBe(true);
+   });
+ 
+   it("disables the button when isTerminatingGraph is true", () => {
+@@ -89,37 +92,31 @@ describe("RunGraph", () => {
+       createMockReturnValue({ isTerminatingGraph: true }),
+     );
+     renderRunGraph();
+-    expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(
+-      true,
+-    );
++    expect(getButtonByDataId("run-graph-button").disabled).toBe(true);
+   });
+ 
+   it("disables the button when isSaving is true", () => {
+     mockUseRunGraph.mockReturnValue(createMockReturnValue({ isSaving: true }));
+     renderRunGraph();
+-    expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(
+-      true,
+-    );
++    expect(getButtonByDataId("run-graph-button").disabled).toBe(true);
+   });
+ 
+   it("uses data-id run-graph-button when not running", () => {
+     renderRunGraph();
+-    const button = screen.getByRole("button");
+-    expect(button.getAttribute("data-id")).toBe("run-graph-button");
++    expect(getButtonByDataId("run-graph-button")).toBeDefined();
+   });
+ 
+   it("uses data-id stop-graph-button when running", () => {
+     useGraphStore.setState({ isGraphRunning: true });
+     renderRunGraph();
+-    const button = screen.getByRole("button");
+-    expect(button.getAttribute("data-id")).toBe("stop-graph-button");
++    expect(getButtonByDataId("stop-graph-button")).toBeDefined();
+   });
+ 
+   it("calls handleRunGraph when clicked and graph is not running", () => {
+     const handleRunGraph = vi.fn();
+     mockUseRunGraph.mockReturnValue(createMockReturnValue({ handleRunGraph }));
+     renderRunGraph();
+-    fireEvent.click(screen.getByRole("button"));
++    fireEvent.click(getButtonByDataId("run-graph-button"));
+     expect(handleRunGraph).toHaveBeenCalledOnce();
+   });
+ 
+@@ -128,7 +125,7 @@ describe("RunGraph", () => {
+     mockUseRunGraph.mockReturnValue(createMockReturnValue({ handleStopGraph }));
+     useGraphStore.setState({ isGraphRunning: true });
+     renderRunGraph();
+-    fireEvent.click(screen.getByRole("button"));
++    fireEvent.click(getButtonByDataId("stop-graph-button"));
+     expect(handleStopGraph).toHaveBeenCalledOnce();
+   });
+ 
+@@ -144,4 +141,19 @@ describe("RunGraph", () => {
+     renderRunGraph();
+     expect(screen.getByTestId("run-input-dialog")).toBeDefined();
+   });
++
++  it("renders the simulate button when graph is not running", () => {
++    renderRunGraph("test-flow-id");
++    expect(
++      document.querySelector('[data-id="simulate-graph-button"]'),
++    ).not.toBeNull();
++  });
++
++  it("hides the simulate button when graph is running", () => {
++    useGraphStore.setState({ isGraphRunning: true });
++    renderRunGraph();
++    expect(
++      document.querySelector('[data-id="simulate-graph-button"]'),
++    ).toBeNull();
++  });
+ });
+diff --git a/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/RunGraph.tsx b/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/RunGraph.tsx
+index 57890b1f1..99e069308 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/RunGraph.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/RunGraph.tsx
+@@ -5,7 +5,12 @@ import {
+   TooltipContent,
+   TooltipTrigger,
+ } from "@/components/atoms/Tooltip/BaseTooltip";
+-import { CircleNotchIcon, PlayIcon, StopIcon } from "@phosphor-icons/react";
++import {
++  CircleNotchIcon,
++  FlaskIcon,
++  PlayIcon,
++  StopIcon,
++} from "@phosphor-icons/react";
+ import { useShallow } from "zustand/react/shallow";
+ import { RunInputDialog } from "../RunInputDialog/RunInputDialog";
+ import { useRunGraph } from "./useRunGraph";
+@@ -52,13 +57,40 @@ export const RunGraph = ({ flowID }: { flowID: string | null }) => {
+ 
+   return (
+     <>
++      {/* Simulate button — dry-run, no credentials or credits needed */}
++      {!isGraphRunning && (
++        <Tooltip>
++          <TooltipTrigger asChild>
++            <Button
++              size="icon"
++              variant="ghost"
++              data-id="simulate-graph-button"
++              onClick={() => void handleRunGraph({ dryRun: true })}
++              disabled={!flowID || isLoading}
++              className="group text-amber-600 hover:bg-amber-50 hover:text-amber-700"
++            >
++              <FlaskIcon
++                className="size-4 transition-transform duration-200 ease-out group-hover:scale-110"
++                weight="fill"
++              />
++            </Button>
++          </TooltipTrigger>
++          <TooltipContent>
++            Simulate agent (no real execution — LLM-generated outputs)
++          </TooltipContent>
++        </Tooltip>
++      )}
++
++      {/* Run / Stop button */}
+       <Tooltip>
+         <TooltipTrigger asChild>
+           <Button
+             size="icon"
+             variant={isGraphRunning ? "destructive" : "primary"}
+             data-id={isGraphRunning ? "stop-graph-button" : "run-graph-button"}
+-            onClick={isGraphRunning ? handleStopGraph : handleRunGraph}
++            onClick={
++              isGraphRunning ? handleStopGraph : () => void handleRunGraph()
++            }
+             disabled={!flowID || isLoading}
+             className="group"
+           >
+diff --git a/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/useRunGraph.ts b/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/useRunGraph.ts
+index 51bb57057..875feaf3f 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/useRunGraph.ts
++++ b/autogpt_platform/frontend/src/app/(platform)/build/components/BuilderActions/components/RunGraph/useRunGraph.ts
+@@ -129,10 +129,12 @@ export const useRunGraph = () => {
+       },
+     });
+ 
+-  const handleRunGraph = async () => {
++  const handleRunGraph = async ({
++    dryRun = false,
++  }: { dryRun?: boolean } = {}) => {
+     await saveGraph(undefined);
+ 
+-    if (hasInputs() || hasCredentials()) {
++    if (!dryRun && (hasInputs() || hasCredentials())) {
+       setOpenRunInputDialog(true);
+     } else {
+       // Optimistically set running state immediately for responsive UI
+@@ -140,7 +142,12 @@ export const useRunGraph = () => {
+       await executeGraph({
+         graphId: flowID ?? "",
+         graphVersion: flowVersion || null,
+-        data: { inputs: {}, credentials_inputs: {}, source: "builder" },
++        data: {
++          inputs: {},
++          credentials_inputs: {},
++          source: "builder",
++          ...(dryRun && { dry_run: true }),
++        },
+       });
+     }
+   };
+diff --git a/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/components/BlockOutputCard/BlockOutputCard.tsx b/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/components/BlockOutputCard/BlockOutputCard.tsx
+index cd434185a..4c4a88793 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/components/BlockOutputCard/BlockOutputCard.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/components/BlockOutputCard/BlockOutputCard.tsx
+@@ -117,6 +117,12 @@ function OutputKeySection({
+ export function BlockOutputCard({ output }: Props) {
+   return (
+     <ContentGrid>
++      {output.is_dry_run && (
++        <div className="flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-400">
++          <span>⚡</span>
++          <span>Simulated — no real execution occurred</span>
++        </div>
++      )}
+       <ContentMessage>{output.message}</ContentMessage>
+ 
+       {Object.entries(output.outputs ?? {}).map(([key, items]) => (
+diff --git a/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/helpers.tsx b/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/helpers.tsx
+index e5a12539b..dd70d287b 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/helpers.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/copilot/tools/RunBlock/helpers.tsx
+@@ -42,6 +42,7 @@ export interface RunBlockInput {
+   block_id?: string;
+   block_name?: string;
+   input_data?: Record<string, unknown>;
++  dry_run?: boolean;
+ }
+ 
+ export type RunBlockToolOutput =
+@@ -142,6 +143,7 @@ export function getAnimationText(part: {
+   const input = part.input as RunBlockInput | undefined;
+   const blockName = input?.block_name?.trim();
+   const blockId = input?.block_id?.trim();
++  const isDryRun = input?.dry_run === true;
+   // Prefer block_name if available, otherwise fall back to block_id
+   const blockText = blockName
+     ? ` "${blockName}"`
+@@ -152,11 +154,16 @@ export function getAnimationText(part: {
+   switch (part.state) {
+     case "input-streaming":
+     case "input-available":
+-      return `Running${blockText}`;
++      return isDryRun ? `Simulating${blockText}` : `Running${blockText}`;
+     case "output-available": {
+       const output = parseOutput(part.output);
+-      if (!output) return `Running${blockText}`;
+-      if (isRunBlockBlockOutput(output)) return `Ran "${output.block_name}"`;
++      if (!output)
++        return isDryRun ? `Simulating${blockText}` : `Running${blockText}`;
++      if (isRunBlockBlockOutput(output)) {
++        return output.is_dry_run
++          ? `Simulated "${output.block_name}"`
++          : `Ran "${output.block_name}"`;
++      }
+       if (isRunBlockDetailsOutput(output))
+         return `Details for "${output.block.name}"`;
+       if (isRunBlockSetupRequirementsOutput(output)) {
+@@ -170,7 +177,7 @@ export function getAnimationText(part: {
+     case "output-error":
+       return "Action failed";
+     default:
+-      return "Running";
++      return isDryRun ? "Simulating" : "Running";
+   }
+ }
+ 
+@@ -215,13 +222,16 @@ export function getAccordionMeta(output: RunBlockToolOutput): {
+ 
+   if (isRunBlockBlockOutput(output)) {
+     const keys = Object.keys(output.outputs ?? {});
++    const outputCount =
++      keys.length > 0
++        ? `${keys.length} output key${keys.length === 1 ? "" : "s"}`
++        : output.message;
+     return {
+       icon,
+       title: output.block_name,
+-      description:
+-        keys.length > 0
+-          ? `${keys.length} output key${keys.length === 1 ? "" : "s"}`
+-          : output.message,
++      description: output.is_dry_run
++        ? `Simulated · ${outputCount}`
++        : outputCount,
+     };
+   }
+ 
+diff --git a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/RunAgentModal.tsx b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/RunAgentModal.tsx
+index aff06d79c..dfa9c0608 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/RunAgentModal.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/RunAgentModal.tsx
+@@ -78,6 +78,7 @@ export function RunAgentModal({
+ 
+     // Actions
+     handleRun,
++    handleSimulate,
+   } = useAgentRunModal(agent, {
+     onRun: onRunCreated,
+     onSetupTrigger: onTriggerSetup,
+@@ -243,47 +244,50 @@ export function RunAgentModal({
+               }`}
+             >
+               <div className="flex items-center justify-end gap-3">
+-                {isTriggerRunType ? null : !allRequiredInputsAreSet ? (
+-                  <TooltipProvider>
+-                    <Tooltip>
+-                      <TooltipTrigger asChild>
+-                        <span>
+-                          <Button
+-                            variant="secondary"
+-                            onClick={handleOpenScheduleModal}
+-                            disabled={
+-                              isExecuting ||
+-                              isSettingUpTrigger ||
+-                              !allRequiredInputsAreSet
+-                            }
+-                          >
+-                            Schedule Task
+-                          </Button>
+-                        </span>
+-                      </TooltipTrigger>
+-                      <TooltipContent>
+-                        <p>
+-                          Please set up all required inputs and credentials
+-                          before scheduling
+-                        </p>
+-                      </TooltipContent>
+-                    </Tooltip>
+-                  </TooltipProvider>
+-                ) : (
+-                  <Button
+-                    variant="secondary"
+-                    onClick={handleOpenScheduleModal}
+-                    disabled={isExecuting || isSettingUpTrigger}
+-                  >
+-                    Schedule Task
+-                  </Button>
+-                )}
+                 <RunActions
+                   defaultRunType={defaultRunType}
+                   onRun={handleRunWithSafetyCheck}
++                  onSimulate={handleSimulate}
+                   isExecuting={isExecuting}
+                   isSettingUpTrigger={isSettingUpTrigger}
+                   isRunReady={allRequiredInputsAreSet}
++                  scheduleButton={
++                    isTriggerRunType ? undefined : !allRequiredInputsAreSet ? (
++                      <TooltipProvider>
++                        <Tooltip>
++                          <TooltipTrigger asChild>
++                            <span>
++                              <Button
++                                variant="secondary"
++                                onClick={handleOpenScheduleModal}
++                                disabled={
++                                  isExecuting ||
++                                  isSettingUpTrigger ||
++                                  !allRequiredInputsAreSet
++                                }
++                              >
++                                Schedule Task
++                              </Button>
++                            </span>
++                          </TooltipTrigger>
++                          <TooltipContent>
++                            <p>
++                              Please set up all required inputs and credentials
++                              before scheduling
++                            </p>
++                          </TooltipContent>
++                        </Tooltip>
++                      </TooltipProvider>
++                    ) : (
++                      <Button
++                        variant="secondary"
++                        onClick={handleOpenScheduleModal}
++                        disabled={isExecuting || isSettingUpTrigger}
++                      >
++                        Schedule Task
++                      </Button>
++                    )
++                  }
+                 />
+               </div>
+               <ScheduleAgentModal
+diff --git a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/components/RunActions/RunActions.tsx b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/components/RunActions/RunActions.tsx
+index f5f66b30c..d53516b9d 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/components/RunActions/RunActions.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/components/RunActions/RunActions.tsx
+@@ -1,33 +1,53 @@
++import React from "react";
+ import { Button } from "@/components/atoms/Button/Button";
++import { FlaskIcon } from "@phosphor-icons/react";
+ import { RunVariant } from "../../useAgentRunModal";
+ 
+ interface Props {
+   defaultRunType: RunVariant;
+   onRun: () => void;
++  onSimulate?: () => void;
+   isExecuting?: boolean;
+   isSettingUpTrigger?: boolean;
+   isRunReady?: boolean;
++  scheduleButton?: React.ReactNode;
+ }
+ 
+ export function RunActions({
+   defaultRunType,
+   onRun,
++  onSimulate,
+   isExecuting = false,
+   isSettingUpTrigger = false,
+   isRunReady = true,
++  scheduleButton,
+ }: Props) {
++  const isTrigger =
++    defaultRunType === "automatic-trigger" ||
++    defaultRunType === "manual-trigger";
++
+   return (
+     <div className="flex justify-end gap-3">
++      {!isTrigger && onSimulate && (
++        <Button
++          variant="ghost"
++          onClick={onSimulate}
++          disabled={isExecuting || isSettingUpTrigger}
++          loading={isExecuting}
++          className="gap-1.5 text-amber-600 hover:bg-amber-50 hover:text-amber-700"
++        >
++          <FlaskIcon size={16} weight="fill" />
++          Simulate
++        </Button>
++      )}
++      {scheduleButton}
+       <Button
+         variant="primary"
+         onClick={onRun}
+         disabled={!isRunReady || isExecuting || isSettingUpTrigger}
+         loading={isExecuting || isSettingUpTrigger}
+       >
+-        {defaultRunType === "automatic-trigger" ||
+-        defaultRunType === "manual-trigger"
+-          ? "Set up Trigger"
+-          : "Start Task"}
++        {isTrigger ? "Set up Trigger" : "Start Task"}
+       </Button>
+     </div>
+   );
+diff --git a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/useAgentRunModal.tsx b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/useAgentRunModal.tsx
+index c867b1109..9ce0cb1d3 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/useAgentRunModal.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/modals/RunAgentModal/useAgentRunModal.tsx
+@@ -361,6 +361,19 @@ export function useAgentRunModal(
+     toast,
+   ]);
+ 
++  const handleSimulate = useCallback(() => {
++    executeGraphMutation.mutate({
++      graphId: agent.graph_id,
++      graphVersion: agent.graph_version,
++      data: {
++        inputs: inputValues,
++        credentials_inputs: {},
++        source: "library",
++        dry_run: true,
++      },
++    });
++  }, [agent, inputValues, executeGraphMutation]);
++
+   const hasInputFields = useMemo(() => {
+     return Object.keys(agentInputFields).length > 0;
+   }, [agentInputFields]);
+@@ -385,5 +398,6 @@ export function useAgentRunModal(
+     isExecuting: executeGraphMutation.isPending,
+     isSettingUpTrigger: setupTriggerMutation.isPending,
+     handleRun,
++    handleSimulate,
+   };
+ }
+diff --git a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/selected-views/RunDetailHeader/RunDetailHeader.tsx b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/selected-views/RunDetailHeader/RunDetailHeader.tsx
+index 4e98c70de..f93ac00d4 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/selected-views/RunDetailHeader/RunDetailHeader.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/selected-views/RunDetailHeader/RunDetailHeader.tsx
+@@ -1,7 +1,7 @@
+ import { GraphExecution } from "@/app/api/__generated__/models/graphExecution";
+ import { LibraryAgent } from "@/app/api/__generated__/models/libraryAgent";
+ import { Text } from "@/components/atoms/Text/Text";
+-import { ClockClockwiseIcon } from "@phosphor-icons/react";
++import { ClockClockwiseIcon, FlaskIcon } from "@phosphor-icons/react";
+ import { formatDistanceToNow, formatDistanceStrict } from "date-fns";
+ import { AGENT_LIBRARY_SECTION_PADDING_X } from "../../../helpers";
+ import { RunStatusBadge } from "../SelectedRunView/components/RunStatusBadge";
+@@ -22,7 +22,21 @@ export function RunDetailHeader({ agent, run, scheduleRecurrence }: Props) {
+           <div className="flex w-full flex-col flex-wrap items-start justify-between gap-1 md:flex-row md:items-center">
+             <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
+               {run?.status ? (
+-                <RunStatusBadge status={run.status} />
++                <div className="flex items-center gap-2">
++                  <RunStatusBadge status={run.status} />
++                  {run.is_dry_run && (
++                    <div className="inline-flex items-center gap-1 rounded-md bg-amber-50 p-1">
++                      <FlaskIcon
++                        size={16}
++                        className="text-amber-700"
++                        weight="fill"
++                      />
++                      <Text variant="small-medium" className="!text-amber-700">
++                        Simulated
++                      </Text>
++                    </div>
++                  )}
++                </div>
+               ) : scheduleRecurrence ? (
+                 <div className="inline-flex items-center gap-1 rounded-md bg-yellow-50 p-1">
+                   <ClockClockwiseIcon
+diff --git a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/sidebar/SidebarRunsList/components/TaskListItem.tsx b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/sidebar/SidebarRunsList/components/TaskListItem.tsx
+index b9320822f..d44e5fb5e 100644
+--- a/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/sidebar/SidebarRunsList/components/TaskListItem.tsx
++++ b/autogpt_platform/frontend/src/app/(platform)/library/agents/[id]/components/NewAgentLibraryView/components/sidebar/SidebarRunsList/components/TaskListItem.tsx
+@@ -6,6 +6,7 @@ import { LibraryAgent } from "@/app/api/__generated__/models/libraryAgent";
+ import {
+   CheckCircleIcon,
+   ClockIcon,
++  FlaskIcon,
+   PauseCircleIcon,
+   StopCircleIcon,
+   WarningCircleIcon,
+@@ -72,10 +73,18 @@ export function TaskListItem({
+   onClick,
+   onDeleted,
+ }: Props) {
++  const icon = run.is_dry_run ? (
++    <IconWrapper className="border-amber-50 bg-amber-50">
++      <FlaskIcon size={16} className="text-amber-700" weight="fill" />
++    </IconWrapper>
++  ) : (
++    statusIconMap[run.status]
++  );
++
+   return (
+     <SidebarItemCard
+-      icon={statusIconMap[run.status]}
+-      title={title}
++      icon={icon}
++      title={run.is_dry_run ? `${title} (Simulated)` : title}
+       description={
+         run.started_at
+           ? formatDistanceToNow(run.started_at, { addSuffix: true })
+diff --git a/autogpt_platform/frontend/src/app/api/__generated__/models/blockOutputResponse.ts b/autogpt_platform/frontend/src/app/api/__generated__/models/blockOutputResponse.ts
+new file mode 100644
+index 000000000..79789d50b
+--- /dev/null
++++ b/autogpt_platform/frontend/src/app/api/__generated__/models/blockOutputResponse.ts
+@@ -0,0 +1,24 @@
++/**
++ * Generated by orval v7.13.0 🍺
++ * Do not edit manually.
++ * AutoGPT Agent Server
++ * This server is used to execute agents that are created by the AutoGPT system.
++ * OpenAPI spec version: 0.1
++ */
++import type { ResponseType } from "./responseType";
++import type { BlockOutputResponseSessionId } from "./blockOutputResponseSessionId";
++import type { BlockOutputResponseOutputs } from "./blockOutputResponseOutputs";
++
++/**
++ * Response for run_block tool.
++ */
++export interface BlockOutputResponse {
++  type?: ResponseType;
++  message: string;
++  session_id?: BlockOutputResponseSessionId;
++  block_id: string;
++  block_name: string;
++  outputs: BlockOutputResponseOutputs;
++  success?: boolean;
++  is_dry_run?: boolean;
++}
+diff --git a/autogpt_platform/frontend/src/app/api/__generated__/models/graphExecutionMeta.ts b/autogpt_platform/frontend/src/app/api/__generated__/models/graphExecutionMeta.ts
+new file mode 100644
+index 000000000..c8bf7115c
+--- /dev/null
++++ b/autogpt_platform/frontend/src/app/api/__generated__/models/graphExecutionMeta.ts
+@@ -0,0 +1,36 @@
++/**
++ * Generated by orval v7.13.0 🍺
++ * Do not edit manually.
++ * AutoGPT Agent Server
++ * This server is used to execute agents that are created by the AutoGPT system.
++ * OpenAPI spec version: 0.1
++ */
++import type { GraphExecutionMetaInputs } from "./graphExecutionMetaInputs";
++import type { GraphExecutionMetaCredentialInputs } from "./graphExecutionMetaCredentialInputs";
++import type { GraphExecutionMetaNodesInputMasks } from "./graphExecutionMetaNodesInputMasks";
++import type { GraphExecutionMetaPresetId } from "./graphExecutionMetaPresetId";
++import type { AgentExecutionStatus } from "./agentExecutionStatus";
++import type { GraphExecutionMetaStartedAt } from "./graphExecutionMetaStartedAt";
++import type { GraphExecutionMetaEndedAt } from "./graphExecutionMetaEndedAt";
++import type { GraphExecutionMetaShareToken } from "./graphExecutionMetaShareToken";
++import type { GraphExecutionMetaStats } from "./graphExecutionMetaStats";
++
++export interface GraphExecutionMeta {
++  id: string;
++  user_id: string;
++  graph_id: string;
++  graph_version: number;
++  inputs: GraphExecutionMetaInputs;
++  credential_inputs: GraphExecutionMetaCredentialInputs;
++  nodes_input_masks: GraphExecutionMetaNodesInputMasks;
++  preset_id: GraphExecutionMetaPresetId;
++  status: AgentExecutionStatus;
++  /** When execution started running. Null if not yet started (QUEUED). */
++  started_at?: GraphExecutionMetaStartedAt;
++  /** When execution finished. Null if not yet completed (QUEUED, RUNNING, INCOMPLETE, REVIEW). */
++  ended_at?: GraphExecutionMetaEndedAt;
++  is_shared?: boolean;
++  share_token?: GraphExecutionMetaShareToken;
++  is_dry_run?: boolean;
++  stats: GraphExecutionMetaStats;
++}
+diff --git a/autogpt_platform/frontend/src/app/api/openapi.json b/autogpt_platform/frontend/src/app/api/openapi.json
+index 14fa8e997..192637a1e 100644
+--- a/autogpt_platform/frontend/src/app/api/openapi.json
++++ b/autogpt_platform/frontend/src/app/api/openapi.json
+@@ -7871,7 +7871,12 @@
+             "type": "object",
+             "title": "Outputs"
+           },
+-          "success": { "type": "boolean", "title": "Success", "default": true }
++          "success": { "type": "boolean", "title": "Success", "default": true },
++          "is_dry_run": {
++            "type": "boolean",
++            "title": "Is Dry Run",
++            "default": false
++          }
+         },
+         "type": "object",
+         "required": ["message", "block_id", "block_name", "outputs"],
+@@ -8025,7 +8030,8 @@
+               { "type": "null" }
+             ],
+             "title": "Source"
+-          }
++          },
++          "dry_run": { "type": "boolean", "title": "Dry Run", "default": false }
+         },
+         "type": "object",
+         "title": "Body_postV1Execute graph agent"
+@@ -8827,6 +8833,16 @@
+               { "type": "null" }
+             ],
+             "title": "Inputs Summary"
++          },
++          "node_executions": {
++            "anyOf": [
++              {
++                "items": { "additionalProperties": true, "type": "object" },
++                "type": "array"
++              },
++              { "type": "null" }
++            ],
++            "title": "Node Executions"
+           }
+         },
+         "type": "object",
+@@ -9067,6 +9083,11 @@
+             "anyOf": [{ "type": "string" }, { "type": "null" }],
+             "title": "Share Token"
+           },
++          "is_dry_run": {
++            "type": "boolean",
++            "title": "Is Dry Run",
++            "default": false
++          },
+           "stats": {
+             "anyOf": [
+               { "$ref": "#/components/schemas/Stats" },
+@@ -9212,6 +9233,11 @@
+             "anyOf": [{ "type": "string" }, { "type": "null" }],
+             "title": "Share Token"
+           },
++          "is_dry_run": {
++            "type": "boolean",
++            "title": "Is Dry Run",
++            "default": false
++          },
+           "stats": {
+             "anyOf": [
+               { "$ref": "#/components/schemas/Stats" },
+@@ -9300,6 +9326,11 @@
+             "anyOf": [{ "type": "string" }, { "type": "null" }],
+             "title": "Share Token"
+           },
++          "is_dry_run": {
++            "type": "boolean",
++            "title": "Is Dry Run",
++            "default": false
++          },
+           "stats": {
+             "anyOf": [
+               { "$ref": "#/components/schemas/Stats" },

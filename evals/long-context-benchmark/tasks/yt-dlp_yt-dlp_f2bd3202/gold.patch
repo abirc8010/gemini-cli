@@ -1,0 +1,62 @@
+diff --git a/yt_dlp/extractor/youtube/_base.py b/yt_dlp/extractor/youtube/_base.py
+index a3ae1599d..c65252593 100644
+--- a/yt_dlp/extractor/youtube/_base.py
++++ b/yt_dlp/extractor/youtube/_base.py
+@@ -368,7 +368,7 @@ def short_client_name(client_name):
+ 
+ def _fix_embedded_ytcfg(ytcfg):
+     ytcfg['INNERTUBE_CONTEXT'].setdefault('thirdParty', {}).update({
+-        'embedUrl': 'https://www.youtube.com/',  # Can be any valid URL
++        'embedUrl': 'https://www.reddit.com/',  # Can be any valid non-YouTube URL
+     })
+ 
+ 
+@@ -967,6 +967,7 @@ def _download_ytcfg(self, client, video_id):
+             url, video_id, note=f'Downloading {client.replace("_", " ").strip()} client config',
+             headers=traverse_obj(self._get_default_ytcfg(client), {
+                 'User-Agent': ('INNERTUBE_CONTEXT', 'client', 'userAgent', {str}),
++                'Referer': ('INNERTUBE_CONTEXT', 'thirdParty', 'embedUrl', {str}),
+             }))
+ 
+         ytcfg = self.extract_ytcfg(video_id, webpage) or {}
+diff --git a/yt_dlp/extractor/youtube/_video.py b/yt_dlp/extractor/youtube/_video.py
+index 67fb6ca34..49b8b06ee 100644
+--- a/yt_dlp/extractor/youtube/_video.py
++++ b/yt_dlp/extractor/youtube/_video.py
+@@ -2680,12 +2680,14 @@ def _get_checkok_params():
+         return {'contentCheckOk': True, 'racyCheckOk': True}
+ 
+     @classmethod
+-    def _generate_player_context(cls, sts=None, use_ad_playback_context=False):
++    def _generate_player_context(cls, sts=None, use_ad_playback_context=False, encrypted_context=None):
+         context = {
+             'html5Preference': 'HTML5_PREF_WANTS',
+         }
+         if sts is not None:
+             context['signatureTimestamp'] = sts
++        if encrypted_context:
++            context['encryptedHostFlags'] = encrypted_context
+ 
+         playback_context = {
+             'contentPlaybackContext': context,
+@@ -2930,7 +2932,19 @@ def _extract_player_response(self, client, video_id, webpage_ytcfg, player_ytcfg
+             self._configuration_arg('use_ad_playback_context', ['false'])[0] != 'false'
+             and traverse_obj(INNERTUBE_CLIENTS, (client, 'SUPPORTS_AD_PLAYBACK_CONTEXT', {bool})))
+ 
+-        yt_query.update(self._generate_player_context(sts, use_ad_playback_context))
++        # web_embedded player requests may need to include encryptedHostFlags in its contentPlaybackContext.
++        # This can be detected with the embeds_enable_encrypted_host_flags_enforcement experiemnt flag,
++        # but there is no harm in including encryptedHostFlags with all web_embedded player requests.
++        encrypted_context = None
++        if client == 'web_embedded':
++            encrypted_context = traverse_obj(player_ytcfg, (
++                'WEB_PLAYER_CONTEXT_CONFIGS', 'WEB_PLAYER_CONTEXT_CONFIG_ID_EMBEDDED_PLAYER', 'encryptedHostFlags'))
++
++        yt_query.update(
++            self._generate_player_context(
++                sts=sts,
++                use_ad_playback_context=use_ad_playback_context,
++                encrypted_context=encrypted_context))
+ 
+         return self._extract_response(
+             item_id=video_id, ep='player', query=yt_query,

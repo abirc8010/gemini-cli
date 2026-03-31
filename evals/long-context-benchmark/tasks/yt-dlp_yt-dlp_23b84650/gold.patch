@@ -1,0 +1,192 @@
+diff --git a/README.md b/README.md
+index ef2e2493f..6b2e6c003 100644
+--- a/README.md
++++ b/README.md
+@@ -1856,7 +1856,7 @@ # EXTRACTOR ARGUMENTS
+ #### youtube
+ * `lang`: Prefer translated metadata (`title`, `description` etc) of this language code (case-sensitive). By default, the video primary language metadata is preferred, with a fallback to `en` translated. See [youtube/_base.py](https://github.com/yt-dlp/yt-dlp/blob/415b4c9f955b1a0391204bd24a7132590e7b3bdb/yt_dlp/extractor/youtube/_base.py#L402-L409) for the list of supported content language codes
+ * `skip`: One or more of `hls`, `dash` or `translated_subs` to skip extraction of the m3u8 manifests, dash manifests and [auto-translated subtitles](https://github.com/yt-dlp/yt-dlp/issues/4090#issuecomment-1158102032) respectively
+-* `player_client`: Clients to extract video data from. The currently available clients are `web`, `web_safari`, `web_embedded`, `web_music`, `web_creator`, `mweb`, `ios`, `android`, `android_sdkless`, `android_vr`, `tv`, `tv_simply`, `tv_downgraded`, and `tv_embedded`. By default, `tv,android_sdkless,web` is used. If no JavaScript runtime/engine is available, then `android_sdkless,web_safari,web` is used. If logged-in cookies are passed to yt-dlp, then `tv_downgraded,web_safari,web` is used for free accounts and `tv_downgraded,web_creator,web` is used for premium accounts. The `web_music` client is added for `music.youtube.com` URLs when logged-in cookies are used. The `web_embedded` client is added for age-restricted videos but only works if the video is embeddable. The `tv_embedded` and `web_creator` clients are added for age-restricted videos if account age-verification is required. Some clients, such as `web` and `web_music`, require a `po_token` for their formats to be downloadable. Some clients, such as `web_creator`, will only work with authentication. Not all clients support authentication via cookies. You can use `default` for the default clients, or you can use `all` for all clients (not recommended). You can prefix a client with `-` to exclude it, e.g. `youtube:player_client=default,-ios`
++* `player_client`: Clients to extract video data from. The currently available clients are `web`, `web_safari`, `web_embedded`, `web_music`, `web_creator`, `mweb`, `ios`, `android`, `android_sdkless`, `android_vr`, `tv`, `tv_simply`, `tv_downgraded`, and `tv_embedded`. By default, `android_sdkless,web,web_safari` is used. If no JavaScript runtime/engine is available, then only `android_sdkless` is used. If logged-in cookies are passed to yt-dlp, then `tv_downgraded,web,web_safari` is used for free accounts and `tv_downgraded,web_creator,web` is used for premium accounts. The `web_music` client is added for `music.youtube.com` URLs when logged-in cookies are used. The `web_embedded` client is added for age-restricted videos but only works if the video is embeddable. The `tv_embedded` and `web_creator` clients are added for age-restricted videos if account age-verification is required. Some clients, such as `web` and `web_music`, require a `po_token` for their formats to be downloadable. Some clients, such as `web_creator`, will only work with authentication. Not all clients support authentication via cookies. You can use `default` for the default clients, or you can use `all` for all clients (not recommended). You can prefix a client with `-` to exclude it, e.g. `youtube:player_client=default,-ios`
+ * `player_skip`: Skip some network requests that are generally needed for robust extraction. One or more of `configs` (skip client configs), `webpage` (skip initial webpage), `js` (skip js player), `initial_data` (skip initial data/next ep request). While these options can help reduce the number of requests needed or avoid some rate-limiting, they could cause issues such as missing formats or metadata.  See [#860](https://github.com/yt-dlp/yt-dlp/pull/860) and [#12826](https://github.com/yt-dlp/yt-dlp/issues/12826) for more details
+ * `webpage_skip`: Skip extraction of embedded webpage data. One or both of `player_response`, `initial_data`. These options are for testing purposes and don't skip any network requests
+ * `player_params`: YouTube player parameters to use for player requests. Will overwrite any default ones set by yt-dlp.
+diff --git a/yt_dlp/extractor/youtube/_base.py b/yt_dlp/extractor/youtube/_base.py
+index 26925090a..8e38408d9 100644
+--- a/yt_dlp/extractor/youtube/_base.py
++++ b/yt_dlp/extractor/youtube/_base.py
+@@ -99,7 +99,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'WEB',
+-                'clientVersion': '2.20250925.01.00',
++                'clientVersion': '2.20260114.08.00',
+             },
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 1,
+@@ -112,7 +112,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'WEB',
+-                'clientVersion': '2.20250925.01.00',
++                'clientVersion': '2.20260114.08.00',
+                 'userAgent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)',
+             },
+         },
+@@ -125,7 +125,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'WEB_EMBEDDED_PLAYER',
+-                'clientVersion': '1.20250923.21.00',
++                'clientVersion': '1.20260115.01.00',
+             },
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 56,
+@@ -136,7 +136,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'WEB_REMIX',
+-                'clientVersion': '1.20250922.03.00',
++                'clientVersion': '1.20260114.03.00',
+             },
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 67,
+@@ -166,7 +166,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'WEB_CREATOR',
+-                'clientVersion': '1.20250922.03.00',
++                'clientVersion': '1.20260114.05.00',
+             },
+         },
+         'INNERTUBE_CONTEXT_CLIENT_NAME': 62,
+@@ -195,9 +195,9 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'ANDROID',
+-                'clientVersion': '20.10.38',
++                'clientVersion': '21.02.35',
+                 'androidSdkVersion': 30,
+-                'userAgent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip',
++                'userAgent': 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip',
+                 'osName': 'Android',
+                 'osVersion': '11',
+             },
+@@ -228,8 +228,8 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'ANDROID',
+-                'clientVersion': '20.10.38',
+-                'userAgent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip',
++                'clientVersion': '21.02.35',
++                'userAgent': 'com.google.android.youtube/21.02.35 (Linux; U; Android 11) gzip',
+                 'osName': 'Android',
+                 'osVersion': '11',
+             },
+@@ -242,11 +242,11 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'ANDROID_VR',
+-                'clientVersion': '1.65.10',
++                'clientVersion': '1.71.26',
+                 'deviceMake': 'Oculus',
+                 'deviceModel': 'Quest 3',
+                 'androidSdkVersion': 32,
+-                'userAgent': 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
++                'userAgent': 'com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
+                 'osName': 'Android',
+                 'osVersion': '12L',
+             },
+@@ -260,10 +260,10 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'IOS',
+-                'clientVersion': '20.10.4',
++                'clientVersion': '21.02.3',
+                 'deviceMake': 'Apple',
+                 'deviceModel': 'iPhone16,2',
+-                'userAgent': 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
++                'userAgent': 'com.google.ios.youtube/21.02.3 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+                 'osName': 'iPhone',
+                 'osVersion': '18.3.2.22D82',
+             },
+@@ -291,7 +291,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'MWEB',
+-                'clientVersion': '2.20250925.01.00',
++                'clientVersion': '2.20260115.01.00',
+                 # mweb previously did not require PO Token with this UA
+                 'userAgent': 'Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)',
+             },
+@@ -322,7 +322,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'TVHTML5',
+-                'clientVersion': '7.20250923.13.00',
++                'clientVersion': '7.20260114.12.00',
+                 'userAgent': 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
+             },
+         },
+@@ -335,7 +335,7 @@ class SubsPoTokenPolicy(BasePoTokenPolicy):
+         'INNERTUBE_CONTEXT': {
+             'client': {
+                 'clientName': 'TVHTML5',
+-                'clientVersion': '5.20251105',
++                'clientVersion': '5.20260114',
+                 'userAgent': 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
+             },
+         },
+diff --git a/yt_dlp/extractor/youtube/_video.py b/yt_dlp/extractor/youtube/_video.py
+index b7525e95a..d6198bf45 100644
+--- a/yt_dlp/extractor/youtube/_video.py
++++ b/yt_dlp/extractor/youtube/_video.py
+@@ -145,9 +145,9 @@ class YoutubeIE(YoutubeBaseInfoExtractor):
+         r'\b(?P<id>vfl[a-zA-Z0-9_-]+)\b.*?\.js$',
+     )
+     _SUBTITLE_FORMATS = ('json3', 'srv1', 'srv2', 'srv3', 'ttml', 'srt', 'vtt')
+-    _DEFAULT_CLIENTS = ('tv', 'android_sdkless', 'web')
+-    _DEFAULT_JSLESS_CLIENTS = ('android_sdkless', 'web_safari', 'web')
+-    _DEFAULT_AUTHED_CLIENTS = ('tv_downgraded', 'web_safari', 'web')
++    _DEFAULT_CLIENTS = ('android_sdkless', 'web', 'web_safari')
++    _DEFAULT_JSLESS_CLIENTS = ('android_sdkless',)
++    _DEFAULT_AUTHED_CLIENTS = ('tv_downgraded', 'web', 'web_safari')
+     # Premium does not require POT (except for subtitles)
+     _DEFAULT_PREMIUM_CLIENTS = ('tv_downgraded', 'web_creator', 'web')
+ 
+@@ -2763,7 +2763,8 @@ def fetch_po_token(self, client='web', context: _PoTokenContext = _PoTokenContex
+             'WEB_PLAYER_CONTEXT_CONFIGS', ..., 'serializedExperimentFlags', {urllib.parse.parse_qs}))
+         if 'true' in traverse_obj(experiments, (..., 'html5_generate_content_po_token', -1)):
+             self.write_debug(
+-                f'{video_id}: Detected experiment to bind GVS PO Token to video id.', only_once=True)
++                f'{video_id}: Detected experiment to bind GVS PO Token '
++                f'to video ID for {client} client', only_once=True)
+             gvs_bind_to_video_id = True
+ 
+         # GVS WebPO Token is bound to visitor_data / Visitor ID when logged out.
+@@ -3487,16 +3488,18 @@ def process_https_formats():
+                         fmt_url = traverse_obj(sc, ('url', 0, {url_or_none}))
+                         encrypted_sig = traverse_obj(sc, ('s', 0))
+                         if not all((sc, fmt_url, skip_player_js or player_url, encrypted_sig)):
+-                            msg = f'Some {client_name} client https formats have been skipped as they are missing a URL. '
++                            msg_tmpl = (
++                                '{}Some {} client https formats have been skipped as they are missing a URL. '
++                                '{}. See  https://github.com/yt-dlp/yt-dlp/issues/12482  for more details')
+                             if client_name in ('web', 'web_safari'):
+-                                msg += 'YouTube is forcing SABR streaming for this client. '
++                                self.write_debug(msg_tmpl.format(
++                                    f'{video_id}: ', client_name,
++                                    'YouTube is forcing SABR streaming for this client'), only_once=True)
+                             else:
+-                                msg += (
++                                msg = (
+                                     f'YouTube may have enabled the SABR-only streaming experiment for '
+-                                    f'{"your account" if self.is_authenticated else "the current session"}. '
+-                                )
+-                            msg += 'See  https://github.com/yt-dlp/yt-dlp/issues/12482  for more details'
+-                            self.report_warning(msg, video_id, only_once=True)
++                                    f'{"your account" if self.is_authenticated else "the current session"}')
++                                self.report_warning(msg_tmpl.format('', client_name, msg), video_id, only_once=True)
+                             continue
+ 
+                     fmt = process_format_stream(

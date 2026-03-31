@@ -1,0 +1,56 @@
+diff --git a/curriculum/challenges/english/blocks/review-javascript-audio-and-video/6723cf27c6e9a0c3f3041385.md b/curriculum/challenges/english/blocks/review-javascript-audio-and-video/6723cf27c6e9a0c3f3041385.md
+index 1417d615a6..ef55f25589 100644
+--- a/curriculum/challenges/english/blocks/review-javascript-audio-and-video/6723cf27c6e9a0c3f3041385.md
++++ b/curriculum/challenges/english/blocks/review-javascript-audio-and-video/6723cf27c6e9a0c3f3041385.md
+@@ -29,6 +29,7 @@ dashedName: review-javascript-audio-and-video
+     audio.play();
+   });
+ </script>
++```
+ 
+ :::
+ 
+@@ -55,6 +56,7 @@ dashedName: review-javascript-audio-and-video
+     });
+   });
+ </script>
++```
+ 
+ :::
+ 
+diff --git a/curriculum/challenges/english/blocks/review-javascript/6723d3cfdd0717d3f1bf27e3.md b/curriculum/challenges/english/blocks/review-javascript/6723d3cfdd0717d3f1bf27e3.md
+index fc4d983110..e45f8eb1a0 100644
+--- a/curriculum/challenges/english/blocks/review-javascript/6723d3cfdd0717d3f1bf27e3.md
++++ b/curriculum/challenges/english/blocks/review-javascript/6723d3cfdd0717d3f1bf27e3.md
+@@ -3191,6 +3191,7 @@ console.log(date.toLocaleDateString("en-GB", options)); // "Wednesday, 15 Octobe
+     audio.play();
+   });
+ </script>
++```
+ 
+ :::
+ 
+diff --git a/curriculum/challenges/english/blocks/review-js-a11y/683766860f71d4a96e429f3a.md b/curriculum/challenges/english/blocks/review-js-a11y/683766860f71d4a96e429f3a.md
+index 873bb1559a..24f894e829 100644
+--- a/curriculum/challenges/english/blocks/review-js-a11y/683766860f71d4a96e429f3a.md
++++ b/curriculum/challenges/english/blocks/review-js-a11y/683766860f71d4a96e429f3a.md
+@@ -24,12 +24,14 @@ dashedName: review-js-a11y
+     btn.setAttribute("aria-expanded", String(!expanded));
+   });
+ </script>
++```
+ 
+ :::
+ 
+ - **`aria-haspopup` attribute**: This state is used to indicate that an interactive element will trigger a pop-up element when activated. You can only use the `aria-haspopup` attribute when the pop-up has one of the following roles: `menu`, `listbox`, `tree`, `grid`, or `dialog`. The value of `aria-haspopup` must be either one of these roles or `true`, which is the same as `menu`.
+ 
+ :::interactive_editor
++
+ ```html
+ <button
+   id="menubutton"
+@@ -328,4 +330,3 @@ Here is an example of a live region that is dynamically updated by JavaScript:
+ # --assignment--
+ 
+ Review the JavaScript and Accessibility topics and concepts.
+-

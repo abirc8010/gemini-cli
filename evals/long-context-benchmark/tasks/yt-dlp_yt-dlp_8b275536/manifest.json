@@ -1,0 +1,9 @@
+{
+  "task_id": "yt-dlp_yt-dlp_8b275536",
+  "repo": "yt-dlp/yt-dlp",
+  "language": "Python",
+  "base_commit": "88b35ff911a999e0b479417237010c305114ba08",
+  "solution_commit": "8b275536d945c4b3d07b6c520677922c67a7c10f",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [".github/workflows/build.yml", "README.md"]
+}

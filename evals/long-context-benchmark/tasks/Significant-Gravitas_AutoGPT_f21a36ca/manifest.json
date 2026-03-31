@@ -1,0 +1,12 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_f21a36ca",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "ee5382a06407c9d48d936ccbfa844d376fb5d221",
+  "solution_commit": "f21a36ca37094cd408d4137962767f1d030653f8",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/blocks/llm.py",
+    "autogpt_platform/backend/backend/blocks/test/test_llm.py"
+  ]
+}

@@ -1,0 +1,36 @@
+diff --git a/test/test_devalue.py b/test/test_devalue.py
+index 29eb89e87..a9fdf8c91 100644
+--- a/test/test_devalue.py
++++ b/test/test_devalue.py
+@@ -227,9 +227,13 @@ def test_devalue_parse_revivers(self):
+             {'a': 'b'}, 'revivers (indirect)')
+ 
+         self.assertEqual(
+-            devalue.parse([['parse', 1], '{"a":0}'], revivers={'parse': lambda x: json.loads(x)}),
++            devalue.parse([['parse', 1], '{"a":0}'], revivers={'parse': json.loads}),
+             {'a': 0}, 'revivers (parse)')
+ 
++        self.assertEqual(
++            devalue.parse([{'a': 1, 'b': 3}, ['EmptyRef', 2], 'false', ['EmptyRef', 2]], revivers={'EmptyRef': json.loads}),
++            {'a': False, 'b': False}, msg='revivers (duplicate EmptyRef)')
++
+ 
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/yt_dlp/utils/jslib/devalue.py b/yt_dlp/utils/jslib/devalue.py
+index ac5bd6857..f3a6e1844 100644
+--- a/yt_dlp/utils/jslib/devalue.py
++++ b/yt_dlp/utils/jslib/devalue.py
+@@ -62,10 +62,10 @@ def parse_iter(parsed: typing.Any, /, *, revivers: dict[str, collections.abc.Cal
+         if isinstance(source, tuple):
+             name, source, reviver = source
+             try:
+-                resolved[source] = target[index] = reviver(target[index])
++                target[index] = reviver(target[index])
+             except Exception as error:
+                 yield TypeError(f'failed to parse {source} as {name!r}: {error}')
+-                resolved[source] = target[index] = None
++                target[index] = None
+             continue
+ 
+         if source in resolved:

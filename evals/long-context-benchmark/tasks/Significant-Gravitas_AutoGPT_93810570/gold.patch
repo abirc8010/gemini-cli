@@ -1,0 +1,1962 @@
+diff --git a/autogpt_platform/backend/backend/blocks/smart_decision_maker.py b/autogpt_platform/backend/backend/blocks/orchestrator.py
+similarity index 97%
+rename from autogpt_platform/backend/backend/blocks/smart_decision_maker.py
+rename to autogpt_platform/backend/backend/blocks/orchestrator.py
+index 739999356..874a24b2a 100644
+--- a/autogpt_platform/backend/backend/blocks/smart_decision_maker.py
++++ b/autogpt_platform/backend/backend/blocks/orchestrator.py
+@@ -258,9 +258,10 @@ def get_pending_tool_calls(conversation_history: list[Any] | None) -> dict[str,
+     return {call_id: count for call_id, count in pending_calls.items() if count > 0}
+ 
+ 
+-class SmartDecisionMakerBlock(Block):
++class OrchestratorBlock(Block):
+     """
+-    A block that uses a language model to make smart decisions based on a given prompt.
++    A block that uses a language model to orchestrate tool calls, supporting both
++    single-shot and iterative agent mode execution.
+     """
+ 
+     class Input(BlockSchemaInput):
+@@ -401,8 +402,8 @@ class SmartDecisionMakerBlock(Block):
+             description="Uses AI to intelligently decide what tool to use.",
+             categories={BlockCategory.AI},
+             block_type=BlockType.AI,
+-            input_schema=SmartDecisionMakerBlock.Input,
+-            output_schema=SmartDecisionMakerBlock.Output,
++            input_schema=OrchestratorBlock.Input,
++            output_schema=OrchestratorBlock.Output,
+             test_input={
+                 "prompt": "Hello, World!",
+                 "credentials": llm.TEST_CREDENTIALS_INPUT,
+@@ -440,7 +441,7 @@ class SmartDecisionMakerBlock(Block):
+         tool_name = custom_name if custom_name else block.name
+ 
+         tool_function: dict[str, Any] = {
+-            "name": SmartDecisionMakerBlock.cleanup(tool_name),
++            "name": OrchestratorBlock.cleanup(tool_name),
+             "description": block.description,
+         }
+         sink_block_input_schema = block.input_schema
+@@ -451,7 +452,7 @@ class SmartDecisionMakerBlock(Block):
+             field_name = link.sink_name
+             is_dynamic = is_dynamic_field(field_name)
+             # Clean property key to ensure Anthropic API compatibility for ALL fields
+-            clean_field_name = SmartDecisionMakerBlock.cleanup(field_name)
++            clean_field_name = OrchestratorBlock.cleanup(field_name)
+             field_mapping[clean_field_name] = field_name
+ 
+             if is_dynamic:
+@@ -485,7 +486,7 @@ class SmartDecisionMakerBlock(Block):
+             field_name = link.sink_name
+             is_dynamic = is_dynamic_field(field_name)
+             # Always use cleaned field name for property key (Anthropic API compliance)
+-            clean_field_name = SmartDecisionMakerBlock.cleanup(field_name)
++            clean_field_name = OrchestratorBlock.cleanup(field_name)
+ 
+             if is_dynamic:
+                 base_name = extract_base_field_name(field_name)
+@@ -542,7 +543,7 @@ class SmartDecisionMakerBlock(Block):
+         tool_name = custom_name if custom_name else sink_graph_meta.name
+ 
+         tool_function: dict[str, Any] = {
+-            "name": SmartDecisionMakerBlock.cleanup(tool_name),
++            "name": OrchestratorBlock.cleanup(tool_name),
+             "description": sink_graph_meta.description,
+         }
+ 
+@@ -552,7 +553,7 @@ class SmartDecisionMakerBlock(Block):
+         for link in links:
+             field_name = link.sink_name
+ 
+-            clean_field_name = SmartDecisionMakerBlock.cleanup(field_name)
++            clean_field_name = OrchestratorBlock.cleanup(field_name)
+             field_mapping[clean_field_name] = field_name
+ 
+             sink_block_input_schema = sink_node.input_default["input_schema"]
+@@ -618,17 +619,13 @@ class SmartDecisionMakerBlock(Block):
+                 raise ValueError(f"Sink node not found: {links[0].sink_id}")
+ 
+             if sink_node.block_id == AgentExecutorBlock().id:
+-                tool_func = (
+-                    await SmartDecisionMakerBlock._create_agent_function_signature(
+-                        sink_node, links
+-                    )
++                tool_func = await OrchestratorBlock._create_agent_function_signature(
++                    sink_node, links
+                 )
+                 return_tool_functions.append(tool_func)
+             else:
+-                tool_func = (
+-                    await SmartDecisionMakerBlock._create_block_function_signature(
+-                        sink_node, links
+-                    )
++                tool_func = await OrchestratorBlock._create_block_function_signature(
++                    sink_node, links
+                 )
+                 return_tool_functions.append(tool_func)
+ 
+@@ -908,7 +905,7 @@ class SmartDecisionMakerBlock(Block):
+                 task=node_exec_future,
+             )
+ 
+-            # Execute the node directly since we're in the SmartDecisionMaker context
++            # Execute the node directly since we're in the Orchestrator context
+             node_exec_future.set_result(
+                 await execution_processor.on_node_execution(
+                     node_exec=node_exec_entry,
+@@ -1112,7 +1109,7 @@ class SmartDecisionMakerBlock(Block):
+                 return
+         elif input_data.last_tool_output:
+             logger.error(
+-                f"[SmartDecisionMakerBlock-node_exec_id={node_exec_id}] "
++                f"[OrchestratorBlock-node_exec_id={node_exec_id}] "
+                 f"No pending tool calls found. This may indicate an issue with the "
+                 f"conversation history, or the tool giving response more than once."
+                 f"This should not happen! Please check the conversation history for any inconsistencies."
+@@ -1249,7 +1246,7 @@ class SmartDecisionMakerBlock(Block):
+                 emit_key = f"tools_^_{sink_node_id}_~_{original_field_name}"
+ 
+                 logger.debug(
+-                    "[SmartDecisionMakerBlock|geid:%s|neid:%s] emit %s",
++                    "[OrchestratorBlock|geid:%s|neid:%s] emit %s",
+                     graph_exec_id,
+                     node_exec_id,
+                     emit_key,
+diff --git a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker.py b/autogpt_platform/backend/backend/blocks/test/test_orchestrator.py
+similarity index 91%
+rename from autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker.py
+rename to autogpt_platform/backend/backend/blocks/test/test_orchestrator.py
+index 0f9da7e10..e64eebbd3 100644
+--- a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker.py
++++ b/autogpt_platform/backend/backend/blocks/test/test_orchestrator.py
+@@ -57,7 +57,7 @@ async def execute_graph(
+ @pytest.mark.asyncio(loop_scope="session")
+ async def test_graph_validation_with_tool_nodes_correct(server: SpinTestServer):
+     from backend.blocks.agent import AgentExecutorBlock
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data import graph
+ 
+     test_user = await create_test_user()
+@@ -66,7 +66,7 @@ async def test_graph_validation_with_tool_nodes_correct(server: SpinTestServer):
+ 
+     nodes = [
+         graph.Node(
+-            block_id=SmartDecisionMakerBlock().id,
++            block_id=OrchestratorBlock().id,
+             input_default={
+                 "prompt": "Hello, World!",
+                 "credentials": creds,
+@@ -108,10 +108,10 @@ async def test_graph_validation_with_tool_nodes_correct(server: SpinTestServer):
+ 
+ 
+ @pytest.mark.asyncio(loop_scope="session")
+-async def test_smart_decision_maker_function_signature(server: SpinTestServer):
++async def test_orchestrator_function_signature(server: SpinTestServer):
+     from backend.blocks.agent import AgentExecutorBlock
+     from backend.blocks.basic import StoreValueBlock
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data import graph
+ 
+     test_user = await create_test_user()
+@@ -120,7 +120,7 @@ async def test_smart_decision_maker_function_signature(server: SpinTestServer):
+ 
+     nodes = [
+         graph.Node(
+-            block_id=SmartDecisionMakerBlock().id,
++            block_id=OrchestratorBlock().id,
+             input_default={
+                 "prompt": "Hello, World!",
+                 "credentials": creds,
+@@ -169,7 +169,7 @@ async def test_smart_decision_maker_function_signature(server: SpinTestServer):
+     )
+     test_graph = await create_graph(server, test_graph, test_user)
+ 
+-    tool_functions = await SmartDecisionMakerBlock._create_tool_node_signatures(
++    tool_functions = await OrchestratorBlock._create_tool_node_signatures(
+         test_graph.nodes[0].id
+     )
+     assert tool_functions is not None, "Tool functions should not be None"
+@@ -198,12 +198,12 @@ async def test_smart_decision_maker_function_signature(server: SpinTestServer):
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_tracks_llm_stats():
+-    """Test that SmartDecisionMakerBlock correctly tracks LLM usage stats."""
++async def test_orchestrator_tracks_llm_stats():
++    """Test that OrchestratorBlock correctly tracks LLM usage stats."""
+     import backend.blocks.llm as llm_module
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock the llm.llm_call function to return controlled data
+     mock_response = MagicMock()
+@@ -224,14 +224,14 @@ async def test_smart_decision_maker_tracks_llm_stats():
+         new_callable=AsyncMock,
+         return_value=mock_response,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=[],
+     ):
+ 
+         # Create test input
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Should I continue with this task?",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -274,12 +274,12 @@ async def test_smart_decision_maker_tracks_llm_stats():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_parameter_validation():
+-    """Test that SmartDecisionMakerBlock correctly validates tool call parameters."""
++async def test_orchestrator_parameter_validation():
++    """Test that OrchestratorBlock correctly validates tool call parameters."""
+     import backend.blocks.llm as llm_module
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock tool functions with specific parameter schema
+     mock_tool_functions = [
+@@ -327,13 +327,13 @@ async def test_smart_decision_maker_parameter_validation():
+         new_callable=AsyncMock,
+         return_value=mock_response_with_typo,
+     ) as mock_llm_call, patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=mock_tool_functions,
+     ):
+ 
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Search for keywords",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -394,13 +394,13 @@ async def test_smart_decision_maker_parameter_validation():
+         new_callable=AsyncMock,
+         return_value=mock_response_missing_required,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=mock_tool_functions,
+     ):
+ 
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Search for keywords",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -454,13 +454,13 @@ async def test_smart_decision_maker_parameter_validation():
+         new_callable=AsyncMock,
+         return_value=mock_response_valid,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=mock_tool_functions,
+     ):
+ 
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Search for keywords",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -518,13 +518,13 @@ async def test_smart_decision_maker_parameter_validation():
+         new_callable=AsyncMock,
+         return_value=mock_response_all_params,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=mock_tool_functions,
+     ):
+ 
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Search for keywords",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -562,12 +562,12 @@ async def test_smart_decision_maker_parameter_validation():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_raw_response_conversion():
+-    """Test that SmartDecisionMaker correctly handles different raw_response types with retry mechanism."""
++async def test_orchestrator_raw_response_conversion():
++    """Test that Orchestrator correctly handles different raw_response types with retry mechanism."""
+     import backend.blocks.llm as llm_module
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock tool functions
+     mock_tool_functions = [
+@@ -637,7 +637,7 @@ async def test_smart_decision_maker_raw_response_conversion():
+     with patch(
+         "backend.blocks.llm.llm_call", new_callable=AsyncMock
+     ) as mock_llm_call, patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=mock_tool_functions,
+@@ -646,7 +646,7 @@ async def test_smart_decision_maker_raw_response_conversion():
+         # Second call returns successful response
+         mock_llm_call.side_effect = [mock_response_retry, mock_response_success]
+ 
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Test prompt",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -715,12 +715,12 @@ async def test_smart_decision_maker_raw_response_conversion():
+         new_callable=AsyncMock,
+         return_value=mock_response_ollama,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=[],  # No tools for this test
+     ):
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Simple prompt",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -771,12 +771,12 @@ async def test_smart_decision_maker_raw_response_conversion():
+         new_callable=AsyncMock,
+         return_value=mock_response_dict,
+     ), patch.object(
+-        SmartDecisionMakerBlock,
++        OrchestratorBlock,
+         "_create_tool_node_signatures",
+         new_callable=AsyncMock,
+         return_value=[],
+     ):
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Another test",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -811,12 +811,12 @@ async def test_smart_decision_maker_raw_response_conversion():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_agent_mode():
++async def test_orchestrator_agent_mode():
+     """Test that agent mode executes tools directly and loops until finished."""
+     import backend.blocks.llm as llm_module
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock tool call that requires multiple iterations
+     mock_tool_call_1 = MagicMock()
+@@ -893,7 +893,7 @@ async def test_smart_decision_maker_agent_mode():
+     with patch("backend.blocks.llm.llm_call", llm_call_mock), patch.object(
+         block, "_create_tool_node_signatures", return_value=mock_tool_signatures
+     ), patch(
+-        "backend.blocks.smart_decision_maker.get_database_manager_async_client",
++        "backend.blocks.orchestrator.get_database_manager_async_client",
+         return_value=mock_db_client,
+     ), patch(
+         "backend.executor.manager.async_update_node_execution_status",
+@@ -929,7 +929,7 @@ async def test_smart_decision_maker_agent_mode():
+         }
+ 
+         # Test agent mode with max_iterations = 3
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Complete this task using tools",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -969,12 +969,12 @@ async def test_smart_decision_maker_agent_mode():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_traditional_mode_default():
++async def test_orchestrator_traditional_mode_default():
+     """Test that default behavior (agent_mode_max_iterations=0) works as traditional mode."""
+     import backend.blocks.llm as llm_module
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock tool call
+     mock_tool_call = MagicMock()
+@@ -1018,7 +1018,7 @@ async def test_smart_decision_maker_traditional_mode_default():
+     ):
+ 
+         # Test default behavior (traditional mode)
+-        input_data = SmartDecisionMakerBlock.Input(
++        input_data = OrchestratorBlock.Input(
+             prompt="Test prompt",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -1060,12 +1060,12 @@ async def test_smart_decision_maker_traditional_mode_default():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_uses_customized_name_for_blocks():
+-    """Test that SmartDecisionMakerBlock uses customized_name from node metadata for tool names."""
++async def test_orchestrator_uses_customized_name_for_blocks():
++    """Test that OrchestratorBlock uses customized_name from node metadata for tool names."""
+     from unittest.mock import MagicMock
+ 
+     from backend.blocks.basic import StoreValueBlock
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data.graph import Link, Node
+ 
+     # Create a mock node with customized_name in metadata
+@@ -1080,7 +1080,7 @@ async def test_smart_decision_maker_uses_customized_name_for_blocks():
+     mock_link.sink_name = "input"
+ 
+     # Call the function directly
+-    result = await SmartDecisionMakerBlock._create_block_function_signature(
++    result = await OrchestratorBlock._create_block_function_signature(
+         mock_node, [mock_link]
+     )
+ 
+@@ -1091,12 +1091,12 @@ async def test_smart_decision_maker_uses_customized_name_for_blocks():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_falls_back_to_block_name():
+-    """Test that SmartDecisionMakerBlock falls back to block.name when no customized_name."""
++async def test_orchestrator_falls_back_to_block_name():
++    """Test that OrchestratorBlock falls back to block.name when no customized_name."""
+     from unittest.mock import MagicMock
+ 
+     from backend.blocks.basic import StoreValueBlock
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data.graph import Link, Node
+ 
+     # Create a mock node without customized_name
+@@ -1111,7 +1111,7 @@ async def test_smart_decision_maker_falls_back_to_block_name():
+     mock_link.sink_name = "input"
+ 
+     # Call the function directly
+-    result = await SmartDecisionMakerBlock._create_block_function_signature(
++    result = await OrchestratorBlock._create_block_function_signature(
+         mock_node, [mock_link]
+     )
+ 
+@@ -1122,11 +1122,11 @@ async def test_smart_decision_maker_falls_back_to_block_name():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_uses_customized_name_for_agents():
+-    """Test that SmartDecisionMakerBlock uses customized_name from metadata for agent nodes."""
++async def test_orchestrator_uses_customized_name_for_agents():
++    """Test that OrchestratorBlock uses customized_name from metadata for agent nodes."""
+     from unittest.mock import AsyncMock, MagicMock, patch
+ 
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data.graph import Link, Node
+ 
+     # Create a mock node with customized_name in metadata
+@@ -1152,10 +1152,10 @@ async def test_smart_decision_maker_uses_customized_name_for_agents():
+     mock_db_client.get_graph_metadata.return_value = mock_graph_meta
+ 
+     with patch(
+-        "backend.blocks.smart_decision_maker.get_database_manager_async_client",
++        "backend.blocks.orchestrator.get_database_manager_async_client",
+         return_value=mock_db_client,
+     ):
+-        result = await SmartDecisionMakerBlock._create_agent_function_signature(
++        result = await OrchestratorBlock._create_agent_function_signature(
+             mock_node, [mock_link]
+         )
+ 
+@@ -1166,11 +1166,11 @@ async def test_smart_decision_maker_uses_customized_name_for_agents():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_agent_falls_back_to_graph_name():
++async def test_orchestrator_agent_falls_back_to_graph_name():
+     """Test that agent node falls back to graph name when no customized_name."""
+     from unittest.mock import AsyncMock, MagicMock, patch
+ 
+-    from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++    from backend.blocks.orchestrator import OrchestratorBlock
+     from backend.data.graph import Link, Node
+ 
+     # Create a mock node without customized_name
+@@ -1196,10 +1196,10 @@ async def test_smart_decision_maker_agent_falls_back_to_graph_name():
+     mock_db_client.get_graph_metadata.return_value = mock_graph_meta
+ 
+     with patch(
+-        "backend.blocks.smart_decision_maker.get_database_manager_async_client",
++        "backend.blocks.orchestrator.get_database_manager_async_client",
+         return_value=mock_db_client,
+     ):
+-        result = await SmartDecisionMakerBlock._create_agent_function_signature(
++        result = await OrchestratorBlock._create_agent_function_signature(
+             mock_node, [mock_link]
+         )
+ 
+diff --git a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dict.py b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_dict.py
+similarity index 85%
+rename from autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dict.py
+rename to autogpt_platform/backend/backend/blocks/test/test_orchestrator_dict.py
+index 2087c0b7d..35340fd3b 100644
+--- a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dict.py
++++ b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_dict.py
+@@ -3,12 +3,12 @@ from unittest.mock import Mock
+ import pytest
+ 
+ from backend.blocks.data_manipulation import AddToListBlock, CreateDictionaryBlock
+-from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++from backend.blocks.orchestrator import OrchestratorBlock
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_handles_dynamic_dict_fields():
+-    """Test Smart Decision Maker can handle dynamic dictionary fields (_#_) for any block"""
++async def test_orchestrator_handles_dynamic_dict_fields():
++    """Test Orchestrator can handle dynamic dictionary fields (_#_) for any block"""
+ 
+     # Create a mock node for CreateDictionaryBlock
+     mock_node = Mock()
+@@ -23,24 +23,24 @@ async def test_smart_decision_maker_handles_dynamic_dict_fields():
+             source_name="tools_^_create_dict_~_name",
+             sink_name="values_#_name",  # Dynamic dict field
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_create_dict_~_age",
+             sink_name="values_#_age",  # Dynamic dict field
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_create_dict_~_city",
+             sink_name="values_#_city",  # Dynamic dict field
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+     # Generate function signature
+-    signature = await SmartDecisionMakerBlock._create_block_function_signature(
++    signature = await OrchestratorBlock._create_block_function_signature(
+         mock_node, mock_links  # type: ignore
+     )
+ 
+@@ -70,8 +70,8 @@ async def test_smart_decision_maker_handles_dynamic_dict_fields():
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_smart_decision_maker_handles_dynamic_list_fields():
+-    """Test Smart Decision Maker can handle dynamic list fields (_$_) for any block"""
++async def test_orchestrator_handles_dynamic_list_fields():
++    """Test Orchestrator can handle dynamic list fields (_$_) for any block"""
+ 
+     # Create a mock node for AddToListBlock
+     mock_node = Mock()
+@@ -86,18 +86,18 @@ async def test_smart_decision_maker_handles_dynamic_list_fields():
+             source_name="tools_^_add_to_list_~_0",
+             sink_name="entries_$_0",  # Dynamic list field
+             sink_id="list_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_add_to_list_~_1",
+             sink_name="entries_$_1",  # Dynamic list field
+             sink_id="list_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+     # Generate function signature
+-    signature = await SmartDecisionMakerBlock._create_block_function_signature(
++    signature = await OrchestratorBlock._create_block_function_signature(
+         mock_node, mock_links  # type: ignore
+     )
+ 
+diff --git a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dynamic_fields.py b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_dynamic_fields.py
+similarity index 94%
+rename from autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dynamic_fields.py
+rename to autogpt_platform/backend/backend/blocks/test/test_orchestrator_dynamic_fields.py
+index 0427b1346..ac4fa0710 100644
+--- a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_dynamic_fields.py
++++ b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_dynamic_fields.py
+@@ -1,4 +1,4 @@
+-"""Comprehensive tests for SmartDecisionMakerBlock dynamic field handling."""
++"""Comprehensive tests for OrchestratorBlock dynamic field handling."""
+ 
+ import json
+ from unittest.mock import AsyncMock, MagicMock, Mock, patch
+@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
+ import pytest
+ 
+ from backend.blocks.data_manipulation import AddToListBlock, CreateDictionaryBlock
+-from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
++from backend.blocks.orchestrator import OrchestratorBlock
+ from backend.blocks.text import MatchTextPatternBlock
+ from backend.data.dynamic_fields import get_dynamic_field_description
+ 
+@@ -37,7 +37,7 @@ async def test_dynamic_field_description_generation():
+ @pytest.mark.asyncio
+ async def test_create_block_function_signature_with_dict_fields():
+     """Test that function signatures are created correctly for dictionary dynamic fields."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Create a mock node for CreateDictionaryBlock
+     mock_node = Mock()
+@@ -52,19 +52,19 @@ async def test_create_block_function_signature_with_dict_fields():
+             source_name="tools_^_create_dict_~_values___name",  # Sanitized source
+             sink_name="values_#_name",  # Original sink
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_create_dict_~_values___age",  # Sanitized source
+             sink_name="values_#_age",  # Original sink
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_create_dict_~_values___email",  # Sanitized source
+             sink_name="values_#_email",  # Original sink
+             sink_id="dict_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+@@ -100,7 +100,7 @@ async def test_create_block_function_signature_with_dict_fields():
+ @pytest.mark.asyncio
+ async def test_create_block_function_signature_with_list_fields():
+     """Test that function signatures are created correctly for list dynamic fields."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Create a mock node for AddToListBlock
+     mock_node = Mock()
+@@ -115,19 +115,19 @@ async def test_create_block_function_signature_with_list_fields():
+             source_name="tools_^_add_list_~_0",
+             sink_name="entries_$_0",  # Dynamic list field
+             sink_id="list_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_add_list_~_1",
+             sink_name="entries_$_1",  # Dynamic list field
+             sink_id="list_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_add_list_~_2",
+             sink_name="entries_$_2",  # Dynamic list field
+             sink_id="list_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+@@ -154,7 +154,7 @@ async def test_create_block_function_signature_with_list_fields():
+ @pytest.mark.asyncio
+ async def test_create_block_function_signature_with_object_fields():
+     """Test that function signatures are created correctly for object dynamic fields."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Create a mock node for MatchTextPatternBlock (simulating object fields)
+     mock_node = Mock()
+@@ -169,13 +169,13 @@ async def test_create_block_function_signature_with_object_fields():
+             source_name="tools_^_extract_~_user_name",
+             sink_name="data_@_user_name",  # Dynamic object field
+             sink_id="extract_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_extract_~_user_email",
+             sink_name="data_@_user_email",  # Dynamic object field
+             sink_id="extract_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+@@ -197,11 +197,11 @@ async def test_create_block_function_signature_with_object_fields():
+ @pytest.mark.asyncio
+ async def test_create_tool_node_signatures():
+     """Test that the mapping between sanitized and original field names is built correctly."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Mock the database client and connected nodes
+     with patch(
+-        "backend.blocks.smart_decision_maker.get_database_manager_async_client"
++        "backend.blocks.orchestrator.get_database_manager_async_client"
+     ) as mock_db:
+         mock_client = AsyncMock()
+         mock_db.return_value = mock_client
+@@ -281,7 +281,7 @@ async def test_create_tool_node_signatures():
+ @pytest.mark.asyncio
+ async def test_output_yielding_with_dynamic_fields():
+     """Test that outputs are yielded correctly with dynamic field names mapped back."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # No more sanitized mapping needed since we removed sanitization
+ 
+@@ -309,13 +309,13 @@ async def test_output_yielding_with_dynamic_fields():
+ 
+     # Mock the LLM call
+     with patch(
+-        "backend.blocks.smart_decision_maker.llm.llm_call", new_callable=AsyncMock
++        "backend.blocks.orchestrator.llm.llm_call", new_callable=AsyncMock
+     ) as mock_llm:
+         mock_llm.return_value = mock_response
+ 
+         # Mock the database manager to avoid HTTP calls during tool execution
+         with patch(
+-            "backend.blocks.smart_decision_maker.get_database_manager_async_client"
++            "backend.blocks.orchestrator.get_database_manager_async_client"
+         ) as mock_db_manager, patch.object(
+             block, "_create_tool_node_signatures", new_callable=AsyncMock
+         ) as mock_sig:
+@@ -420,7 +420,7 @@ async def test_output_yielding_with_dynamic_fields():
+ @pytest.mark.asyncio
+ async def test_mixed_regular_and_dynamic_fields():
+     """Test handling of blocks with both regular and dynamic fields."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Create a mock node
+     mock_node = Mock()
+@@ -450,19 +450,19 @@ async def test_mixed_regular_and_dynamic_fields():
+             source_name="tools_^_test_~_regular",
+             sink_name="regular_field",  # Regular field
+             sink_id="test_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_test_~_dict_key",
+             sink_name="values_#_key1",  # Dynamic dict field
+             sink_id="test_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+         Mock(
+             source_name="tools_^_test_~_dict_key2",
+             sink_name="values_#_key2",  # Dynamic dict field
+             sink_id="test_node_id",
+-            source_id="smart_decision_node_id",
++            source_id="orchestrator_node_id",
+         ),
+     ]
+ 
+@@ -488,7 +488,7 @@ async def test_mixed_regular_and_dynamic_fields():
+ @pytest.mark.asyncio
+ async def test_validation_errors_dont_pollute_conversation():
+     """Test that validation errors are only used during retries and don't pollute the conversation."""
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # Track conversation history changes
+     conversation_snapshots = []
+@@ -535,7 +535,7 @@ async def test_validation_errors_dont_pollute_conversation():
+ 
+     # Mock the LLM call
+     with patch(
+-        "backend.blocks.smart_decision_maker.llm.llm_call", new_callable=AsyncMock
++        "backend.blocks.orchestrator.llm.llm_call", new_callable=AsyncMock
+     ) as mock_llm:
+         mock_llm.side_effect = mock_llm_call
+ 
+@@ -565,7 +565,7 @@ async def test_validation_errors_dont_pollute_conversation():
+ 
+             # Mock the database manager to avoid HTTP calls during tool execution
+             with patch(
+-                "backend.blocks.smart_decision_maker.get_database_manager_async_client"
++                "backend.blocks.orchestrator.get_database_manager_async_client"
+             ) as mock_db_manager:
+                 # Set up the mock database manager for agent mode
+                 mock_db_client = AsyncMock()
+diff --git a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_responses_api.py b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_responses_api.py
+similarity index 98%
+rename from autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_responses_api.py
+rename to autogpt_platform/backend/backend/blocks/test/test_orchestrator_responses_api.py
+index ffd3f4549..b14e24e39 100644
+--- a/autogpt_platform/backend/backend/blocks/test/test_smart_decision_maker_responses_api.py
++++ b/autogpt_platform/backend/backend/blocks/test/test_orchestrator_responses_api.py
+@@ -1,6 +1,6 @@
+-"""Tests for SmartDecisionMakerBlock compatibility with the OpenAI Responses API.
++"""Tests for OrchestratorBlock compatibility with the OpenAI Responses API.
+ 
+-The SmartDecisionMakerBlock manages conversation history in the Chat Completions
++The OrchestratorBlock manages conversation history in the Chat Completions
+ format, but OpenAI models now use the Responses API which has a fundamentally
+ different conversation structure.  These tests document:
+ 
+@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
+ 
+-from backend.blocks.smart_decision_maker import (
+-    SmartDecisionMakerBlock,
++from backend.blocks.orchestrator import (
++    OrchestratorBlock,
+     _combine_tool_responses,
+     _convert_raw_response_to_dict,
+     _create_tool_response,
+@@ -733,7 +733,7 @@ class TestUpdateConversation:
+ 
+     def test_dict_raw_response_no_reasoning_no_tools(self):
+         """Dict raw_response, no reasoning → appends assistant dict."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response({"role": "assistant", "content": "hi"})
+         block._update_conversation(prompt, resp)
+@@ -741,7 +741,7 @@ class TestUpdateConversation:
+ 
+     def test_dict_raw_response_with_reasoning_no_tool_calls(self):
+         """Reasoning present, no tool calls → reasoning prepended."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response(
+             {"role": "assistant", "content": "answer"},
+@@ -757,7 +757,7 @@ class TestUpdateConversation:
+ 
+     def test_dict_raw_response_with_reasoning_and_anthropic_tool_calls(self):
+         """Reasoning + Anthropic tool_use in content → reasoning skipped."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         raw = {
+             "role": "assistant",
+@@ -772,7 +772,7 @@ class TestUpdateConversation:
+ 
+     def test_with_tool_outputs(self):
+         """Tool outputs → extended onto prompt."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response({"role": "assistant", "content": None})
+         outputs = [{"role": "tool", "tool_call_id": "call_1", "content": "r"}]
+@@ -782,7 +782,7 @@ class TestUpdateConversation:
+ 
+     def test_without_tool_outputs(self):
+         """No tool outputs → only assistant message appended."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response({"role": "assistant", "content": "done"})
+         block._update_conversation(prompt, resp, None)
+@@ -790,7 +790,7 @@ class TestUpdateConversation:
+ 
+     def test_string_raw_response(self):
+         """Ollama string → wrapped as assistant dict."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response("hello from ollama")
+         block._update_conversation(prompt, resp)
+@@ -800,7 +800,7 @@ class TestUpdateConversation:
+ 
+     def test_responses_api_text_response_produces_valid_items(self):
+         """Responses API text response → conversation items must have valid role."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = [
+             {"role": "system", "content": "sys"},
+             {"role": "user", "content": "user"},
+@@ -820,7 +820,7 @@ class TestUpdateConversation:
+ 
+     def test_responses_api_function_call_produces_valid_items(self):
+         """Responses API function_call → conversation items must have valid type."""
+-        block = SmartDecisionMakerBlock()
++        block = OrchestratorBlock()
+         prompt: list[dict] = []
+         resp = self._make_response(
+             _MockResponse(output=[_MockFunctionCall("tool", "{}", call_id="call_1")])
+@@ -856,7 +856,7 @@ async def test_agent_mode_conversation_valid_for_responses_api():
+     """
+     import backend.blocks.llm as llm_module
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     # First response: tool call
+     mock_tc = MagicMock()
+@@ -936,7 +936,7 @@ async def test_agent_mode_conversation_valid_for_responses_api():
+     with patch("backend.blocks.llm.llm_call", llm_mock), patch.object(
+         block, "_create_tool_node_signatures", return_value=tool_sigs
+     ), patch(
+-        "backend.blocks.smart_decision_maker.get_database_manager_async_client",
++        "backend.blocks.orchestrator.get_database_manager_async_client",
+         return_value=mock_db,
+     ), patch(
+         "backend.executor.manager.async_update_node_execution_status",
+@@ -945,7 +945,7 @@ async def test_agent_mode_conversation_valid_for_responses_api():
+         "backend.integrations.creds_manager.IntegrationCredentialsManager"
+     ):
+ 
+-        inp = SmartDecisionMakerBlock.Input(
++        inp = OrchestratorBlock.Input(
+             prompt="Improve this",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+@@ -992,7 +992,7 @@ async def test_traditional_mode_conversation_valid_for_responses_api():
+     """Traditional mode: the yielded conversation must contain only valid items."""
+     import backend.blocks.llm as llm_module
+ 
+-    block = SmartDecisionMakerBlock()
++    block = OrchestratorBlock()
+ 
+     mock_tc = MagicMock()
+     mock_tc.function.name = "my_tool"
+@@ -1028,7 +1028,7 @@ async def test_traditional_mode_conversation_valid_for_responses_api():
+         "backend.blocks.llm.llm_call", new_callable=AsyncMock, return_value=resp
+     ), patch.object(block, "_create_tool_node_signatures", return_value=tool_sigs):
+ 
+-        inp = SmartDecisionMakerBlock.Input(
++        inp = OrchestratorBlock.Input(
+             prompt="Do it",
+             model=llm_module.DEFAULT_LLM_MODEL,
+             credentials=llm_module.TEST_CREDENTIALS_INPUT,  # type: ignore
+diff --git a/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md b/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
+index f91c570bf..65a74392f 100644
+--- a/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
++++ b/autogpt_platform/backend/backend/copilot/sdk/agent_generation_guide.md
+@@ -143,11 +143,11 @@ To use an MCP (Model Context Protocol) tool as a node in the agent:
+    tool_arguments.
+ 6. Output: `result` (the tool's return value) and `error` (error message)
+ 
+-### Using SmartDecisionMakerBlock (AI Orchestrator with Agent Mode)
++### Using OrchestratorBlock (AI Orchestrator with Agent Mode)
+ 
+ To create an agent where AI autonomously decides which tools or sub-agents to
+ call in a loop until the task is complete:
+-1. Create a `SmartDecisionMakerBlock` node
++1. Create a `OrchestratorBlock` node
+    (ID: `3b191d9f-356f-482d-8238-ba04b6d18381`)
+ 2. Set `input_default`:
+    - `agent_mode_max_iterations`: Choose based on task complexity:
+@@ -169,8 +169,8 @@ call in a loop until the task is complete:
+ 3. Wire the `prompt` input from an `AgentInputBlock` (the user's task)
+ 4. Create downstream tool blocks — regular blocks **or** `AgentExecutorBlock`
+    nodes that call sub-agents
+-5. Link each tool to the SmartDecisionMaker: set `source_name: "tools"` on
+-   the SmartDecisionMaker side and `sink_name: <input_field>` on each tool
++5. Link each tool to the Orchestrator: set `source_name: "tools"` on
++   the Orchestrator side and `sink_name: <input_field>` on each tool
+    block's input. Create one link per input field the tool needs.
+ 6. Wire the `finished` output to an `AgentOutputBlock` for the final result
+ 7. Credentials (LLM API key) are configured by the user in the platform UI
+@@ -178,35 +178,35 @@ call in a loop until the task is complete:
+ 
+ **Example — Orchestrator calling two sub-agents:**
+ - Node 1: `AgentInputBlock` (input_default: `{"name": "task"}`)
+-- Node 2: `SmartDecisionMakerBlock` (input_default:
++- Node 2: `OrchestratorBlock` (input_default:
+   `{"agent_mode_max_iterations": 10, "conversation_compaction": true}`)
+ - Node 3: `AgentExecutorBlock` (sub-agent A — set `graph_id`, `graph_version`,
+   `input_schema`, `output_schema` from library agent)
+ - Node 4: `AgentExecutorBlock` (sub-agent B — same pattern)
+ - Node 5: `AgentOutputBlock` (input_default: `{"name": "result"}`)
+ - Links:
+-  - Input→SDM: `source_name: "result"`, `sink_name: "prompt"`
+-  - SDM→Agent A (per input field): `source_name: "tools"`,
++  - Input→Orchestrator: `source_name: "result"`, `sink_name: "prompt"`
++  - Orchestrator→Agent A (per input field): `source_name: "tools"`,
+     `sink_name: "<agent_a_input_field>"`
+-  - SDM→Agent B (per input field): `source_name: "tools"`,
++  - Orchestrator→Agent B (per input field): `source_name: "tools"`,
+     `sink_name: "<agent_b_input_field>"`
+-  - SDM→Output: `source_name: "finished"`, `sink_name: "value"`
++  - Orchestrator→Output: `source_name: "finished"`, `sink_name: "value"`
+ 
+ **Example — Orchestrator calling regular blocks as tools:**
+ - Node 1: `AgentInputBlock` (input_default: `{"name": "task"}`)
+-- Node 2: `SmartDecisionMakerBlock` (input_default:
++- Node 2: `OrchestratorBlock` (input_default:
+   `{"agent_mode_max_iterations": 5, "conversation_compaction": true}`)
+ - Node 3: `GetWebpageBlock` (regular block — the AI calls it as a tool)
+ - Node 4: `AITextGeneratorBlock` (another regular block as a tool)
+ - Node 5: `AgentOutputBlock` (input_default: `{"name": "result"}`)
+ - Links:
+-  - Input→SDM: `source_name: "result"`, `sink_name: "prompt"`
+-  - SDM→GetWebpage: `source_name: "tools"`, `sink_name: "url"`
+-  - SDM→AITextGenerator: `source_name: "tools"`, `sink_name: "prompt"`
+-  - SDM→Output: `source_name: "finished"`, `sink_name: "value"`
++  - Input→Orchestrator: `source_name: "result"`, `sink_name: "prompt"`
++  - Orchestrator→GetWebpage: `source_name: "tools"`, `sink_name: "url"`
++  - Orchestrator→AITextGenerator: `source_name: "tools"`, `sink_name: "prompt"`
++  - Orchestrator→Output: `source_name: "finished"`, `sink_name: "value"`
+ 
+ Regular blocks work exactly like sub-agents as tools — wire each input
+-field from `source_name: "tools"` on the SmartDecisionMaker side.
++field from `source_name: "tools"` on the Orchestrator side.
+ 
+ ### Example: Simple AI Text Processor
+ 
+diff --git a/autogpt_platform/backend/backend/copilot/tools/agent_generator/fixer.py b/autogpt_platform/backend/backend/copilot/tools/agent_generator/fixer.py
+index 395718ad4..1c514ef53 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/agent_generator/fixer.py
++++ b/autogpt_platform/backend/backend/copilot/tools/agent_generator/fixer.py
+@@ -7,7 +7,7 @@ from typing import Any
+ from .helpers import (
+     AGENT_EXECUTOR_BLOCK_ID,
+     MCP_TOOL_BLOCK_ID,
+-    SMART_DECISION_MAKER_BLOCK_ID,
++    TOOL_ORCHESTRATOR_BLOCK_ID,
+     AgentDict,
+     are_types_compatible,
+     generate_uuid,
+@@ -31,7 +31,7 @@ _GET_CURRENT_DATE_BLOCK_ID = "b29c1b50-5d0e-4d9f-8f9d-1b0e6fcbf0b1"
+ _GMAIL_SEND_BLOCK_ID = "6c27abc2-e51d-499e-a85f-5a0041ba94f0"
+ _TEXT_REPLACE_BLOCK_ID = "7e7c87ab-3469-4bcc-9abe-67705091b713"
+ 
+-# Defaults applied to SmartDecisionMakerBlock nodes by the fixer.
++# Defaults applied to OrchestratorBlock nodes by the fixer.
+ _SDM_DEFAULTS: dict[str, int | bool] = {
+     "agent_mode_max_iterations": 10,
+     "conversation_compaction": True,
+@@ -1639,8 +1639,8 @@ class AgentFixer:
+ 
+         return agent
+ 
+-    def fix_smart_decision_maker_blocks(self, agent: AgentDict) -> AgentDict:
+-        """Fix SmartDecisionMakerBlock nodes to ensure agent-mode defaults.
++    def fix_orchestrator_blocks(self, agent: AgentDict) -> AgentDict:
++        """Fix OrchestratorBlock nodes to ensure agent-mode defaults.
+ 
+         Ensures:
+         1. ``agent_mode_max_iterations`` defaults to ``10`` (bounded agent mode)
+@@ -1657,7 +1657,7 @@ class AgentFixer:
+         nodes = agent.get("nodes", [])
+ 
+         for node in nodes:
+-            if node.get("block_id") != SMART_DECISION_MAKER_BLOCK_ID:
++            if node.get("block_id") != TOOL_ORCHESTRATOR_BLOCK_ID:
+                 continue
+ 
+             node_id = node.get("id", "unknown")
+@@ -1670,7 +1670,7 @@ class AgentFixer:
+                 if field not in input_default or input_default[field] is None:
+                     input_default[field] = default_value
+                     self.add_fix_log(
+-                        f"SmartDecisionMakerBlock {node_id}: "
++                        f"OrchestratorBlock {node_id}: "
+                         f"Set {field}={default_value!r}"
+                     )
+ 
+@@ -1763,8 +1763,8 @@ class AgentFixer:
+         # Apply fixes for MCPToolBlock nodes
+         agent = self.fix_mcp_tool_blocks(agent)
+ 
+-        # Apply fixes for SmartDecisionMakerBlock nodes (agent-mode defaults)
+-        agent = self.fix_smart_decision_maker_blocks(agent)
++        # Apply fixes for OrchestratorBlock nodes (agent-mode defaults)
++        agent = self.fix_orchestrator_blocks(agent)
+ 
+         # Apply fixes for AgentExecutorBlock nodes (sub-agents)
+         if library_agents:
+diff --git a/autogpt_platform/backend/backend/copilot/tools/agent_generator/helpers.py b/autogpt_platform/backend/backend/copilot/tools/agent_generator/helpers.py
+index 8a07211b7..141426df0 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/agent_generator/helpers.py
++++ b/autogpt_platform/backend/backend/copilot/tools/agent_generator/helpers.py
+@@ -12,7 +12,7 @@ __all__ = [
+     "AGENT_OUTPUT_BLOCK_ID",
+     "AgentDict",
+     "MCP_TOOL_BLOCK_ID",
+-    "SMART_DECISION_MAKER_BLOCK_ID",
++    "TOOL_ORCHESTRATOR_BLOCK_ID",
+     "UUID_REGEX",
+     "are_types_compatible",
+     "generate_uuid",
+@@ -34,7 +34,7 @@ UUID_REGEX = re.compile(r"^" + UUID_RE_STR + r"$")
+ 
+ AGENT_EXECUTOR_BLOCK_ID = "e189baac-8c20-45a1-94a7-55177ea42565"
+ MCP_TOOL_BLOCK_ID = "a0a4b1c2-d3e4-4f56-a7b8-c9d0e1f2a3b4"
+-SMART_DECISION_MAKER_BLOCK_ID = "3b191d9f-356f-482d-8238-ba04b6d18381"
++TOOL_ORCHESTRATOR_BLOCK_ID = "3b191d9f-356f-482d-8238-ba04b6d18381"
+ AGENT_INPUT_BLOCK_ID = "c0a8e994-ebf1-4a9c-a4d8-89d09c86741b"
+ AGENT_OUTPUT_BLOCK_ID = "363ae599-353e-4804-937e-b2ee3cef3da4"
+ 
+diff --git a/autogpt_platform/backend/backend/copilot/tools/agent_generator/validator.py b/autogpt_platform/backend/backend/copilot/tools/agent_generator/validator.py
+index 2c9cdb42d..b9ccfa866 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/agent_generator/validator.py
++++ b/autogpt_platform/backend/backend/copilot/tools/agent_generator/validator.py
+@@ -10,7 +10,7 @@ from .helpers import (
+     AGENT_INPUT_BLOCK_ID,
+     AGENT_OUTPUT_BLOCK_ID,
+     MCP_TOOL_BLOCK_ID,
+-    SMART_DECISION_MAKER_BLOCK_ID,
++    TOOL_ORCHESTRATOR_BLOCK_ID,
+     AgentDict,
+     are_types_compatible,
+     get_defined_property_type,
+@@ -827,18 +827,18 @@ class AgentValidator:
+ 
+         return valid
+ 
+-    def validate_smart_decision_maker_blocks(
++    def validate_orchestrator_blocks(
+         self,
+         agent: AgentDict,
+         node_lookup: dict[str, dict[str, Any]] | None = None,
+     ) -> bool:
+-        """Validate that SmartDecisionMakerBlock nodes have downstream tools.
++        """Validate that OrchestratorBlock nodes have downstream tools.
+ 
+-        Checks that each SmartDecisionMakerBlock node has at least one link
++        Checks that each OrchestratorBlock node has at least one link
+         with ``source_name == "tools"`` connecting to a downstream block.
+         Without tools, the block has nothing to call and will error at runtime.
+ 
+-        Returns True if all SmartDecisionMakerBlock nodes are valid.
++        Returns True if all OrchestratorBlock nodes are valid.
+         """
+         valid = True
+         nodes = agent.get("nodes", [])
+@@ -848,7 +848,7 @@ class AgentValidator:
+         non_tool_block_ids = {AGENT_INPUT_BLOCK_ID, AGENT_OUTPUT_BLOCK_ID}
+ 
+         for node in nodes:
+-            if node.get("block_id") != SMART_DECISION_MAKER_BLOCK_ID:
++            if node.get("block_id") != TOOL_ORCHESTRATOR_BLOCK_ID:
+                 continue
+ 
+             node_id = node.get("id", "unknown")
+@@ -863,7 +863,7 @@ class AgentValidator:
+             max_iter = input_default.get("agent_mode_max_iterations")
+             if max_iter is not None and not isinstance(max_iter, int):
+                 self.add_error(
+-                    f"SmartDecisionMakerBlock node '{customized_name}' "
++                    f"OrchestratorBlock node '{customized_name}' "
+                     f"({node_id}) has non-integer "
+                     f"agent_mode_max_iterations={max_iter!r}. "
+                     f"This field must be an integer."
+@@ -871,7 +871,7 @@ class AgentValidator:
+                 valid = False
+             elif isinstance(max_iter, int) and max_iter < -1:
+                 self.add_error(
+-                    f"SmartDecisionMakerBlock node '{customized_name}' "
++                    f"OrchestratorBlock node '{customized_name}' "
+                     f"({node_id}) has invalid "
+                     f"agent_mode_max_iterations={max_iter}. "
+                     f"Use -1 for infinite or a positive number for "
+@@ -880,7 +880,7 @@ class AgentValidator:
+                 valid = False
+             elif isinstance(max_iter, int) and max_iter > 100:
+                 self.add_error(
+-                    f"SmartDecisionMakerBlock node '{customized_name}' "
++                    f"OrchestratorBlock node '{customized_name}' "
+                     f"({node_id}) has agent_mode_max_iterations="
+                     f"{max_iter} which is unusually high. Values above "
+                     f"100 risk excessive cost and long execution times. "
+@@ -890,7 +890,7 @@ class AgentValidator:
+                 valid = False
+             elif max_iter == 0:
+                 self.add_error(
+-                    f"SmartDecisionMakerBlock node '{customized_name}' "
++                    f"OrchestratorBlock node '{customized_name}' "
+                     f"({node_id}) has agent_mode_max_iterations=0 "
+                     f"(traditional mode). The agent generator only supports "
+                     f"agent mode (set to -1 for infinite or a positive "
+@@ -908,7 +908,7 @@ class AgentValidator:
+ 
+             if not has_tools:
+                 self.add_error(
+-                    f"SmartDecisionMakerBlock node '{customized_name}' "
++                    f"OrchestratorBlock node '{customized_name}' "
+                     f"({node_id}) has no downstream tool blocks connected. "
+                     f"Connect at least one block to its 'tools' output so "
+                     f"the AI has tools to call."
+@@ -1025,8 +1025,8 @@ class AgentValidator:
+                 self.validate_mcp_tool_blocks(agent),
+             ),
+             (
+-                "SmartDecisionMaker blocks",
+-                self.validate_smart_decision_maker_blocks(agent, node_lookup),
++                "Orchestrator blocks",
++                self.validate_orchestrator_blocks(agent, node_lookup),
+             ),
+         ]
+ 
+diff --git a/autogpt_platform/backend/backend/copilot/tools/find_block.py b/autogpt_platform/backend/backend/copilot/tools/find_block.py
+index 9367484c6..5bba308a3 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/find_block.py
++++ b/autogpt_platform/backend/backend/copilot/tools/find_block.py
+@@ -39,7 +39,7 @@ COPILOT_EXCLUDED_BLOCK_TYPES = {
+ 
+ # Specific block IDs excluded from CoPilot (STANDARD type but still require graph context)
+ COPILOT_EXCLUDED_BLOCK_IDS = {
+-    # SmartDecisionMakerBlock - dynamically discovers downstream blocks via graph topology;
++    # OrchestratorBlock - dynamically discovers downstream blocks via graph topology;
+     # usable in agent graphs (guide hardcodes its ID) but cannot run standalone.
+     "3b191d9f-356f-482d-8238-ba04b6d18381",
+ }
+diff --git a/autogpt_platform/backend/backend/copilot/tools/find_block_test.py b/autogpt_platform/backend/backend/copilot/tools/find_block_test.py
+index a2a996ff0..64a7fe378 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/find_block_test.py
++++ b/autogpt_platform/backend/backend/copilot/tools/find_block_test.py
+@@ -69,8 +69,8 @@ class TestFindBlockFiltering:
+         assert BlockType.HUMAN_IN_THE_LOOP in COPILOT_EXCLUDED_BLOCK_TYPES
+         assert BlockType.AGENT in COPILOT_EXCLUDED_BLOCK_TYPES
+ 
+-    def test_excluded_block_ids_contains_smart_decision_maker(self):
+-        """Verify SmartDecisionMakerBlock is in COPILOT_EXCLUDED_BLOCK_IDS."""
++    def test_excluded_block_ids_contains_orchestrator(self):
++        """Verify OrchestratorBlock is in COPILOT_EXCLUDED_BLOCK_IDS."""
+         assert "3b191d9f-356f-482d-8238-ba04b6d18381" in COPILOT_EXCLUDED_BLOCK_IDS
+ 
+     @pytest.mark.asyncio(loop_scope="session")
+@@ -120,18 +120,18 @@ class TestFindBlockFiltering:
+ 
+     @pytest.mark.asyncio(loop_scope="session")
+     async def test_excluded_block_id_filtered_from_results(self):
+-        """Verify SmartDecisionMakerBlock is filtered from search results."""
++        """Verify OrchestratorBlock is filtered from search results."""
+         session = make_session(user_id=_TEST_USER_ID)
+ 
+-        smart_decision_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
++        orchestrator_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
+         search_results = [
+-            {"content_id": smart_decision_id, "score": 0.9},
++            {"content_id": orchestrator_id, "score": 0.9},
+             {"content_id": "normal-block-id", "score": 0.8},
+         ]
+ 
+-        # SmartDecisionMakerBlock has STANDARD type but is excluded by ID
++        # OrchestratorBlock has STANDARD type but is excluded by ID
+         smart_block = make_mock_block(
+-            smart_decision_id, "Smart Decision Maker", BlockType.STANDARD
++            orchestrator_id, "Orchestrator", BlockType.STANDARD
+         )
+         normal_block = make_mock_block(
+             "normal-block-id", "Normal Block", BlockType.STANDARD
+@@ -139,7 +139,7 @@ class TestFindBlockFiltering:
+ 
+         def mock_get_block(block_id):
+             return {
+-                smart_decision_id: smart_block,
++                orchestrator_id: smart_block,
+                 "normal-block-id": normal_block,
+             }.get(block_id)
+ 
+@@ -161,7 +161,7 @@ class TestFindBlockFiltering:
+                     user_id=_TEST_USER_ID, session=session, query="decision"
+                 )
+ 
+-        # Should only return normal block, not SmartDecisionMakerBlock
++        # Should only return normal block, not OrchestratorBlock
+         assert isinstance(response, BlockListResponse)
+         assert len(response.blocks) == 1
+         assert response.blocks[0].id == "normal-block-id"
+@@ -601,10 +601,8 @@ class TestFindBlockDirectLookup:
+     async def test_uuid_lookup_excluded_block_id(self):
+         """UUID matching an excluded block ID returns NoResultsResponse."""
+         session = make_session(user_id=_TEST_USER_ID)
+-        smart_decision_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
+-        block = make_mock_block(
+-            smart_decision_id, "Smart Decision Maker", BlockType.STANDARD
+-        )
++        orchestrator_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
++        block = make_mock_block(orchestrator_id, "Orchestrator", BlockType.STANDARD)
+ 
+         with patch(
+             "backend.copilot.tools.find_block.get_block",
+@@ -612,7 +610,7 @@ class TestFindBlockDirectLookup:
+         ):
+             tool = FindBlockTool()
+             response = await tool._execute(
+-                user_id=_TEST_USER_ID, session=session, query=smart_decision_id
++                user_id=_TEST_USER_ID, session=session, query=orchestrator_id
+             )
+ 
+         from .models import NoResultsResponse
+diff --git a/autogpt_platform/backend/backend/copilot/tools/run_block_test.py b/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
+index 9cbe98fb6..f5b025fe5 100644
+--- a/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
++++ b/autogpt_platform/backend/backend/copilot/tools/run_block_test.py
+@@ -111,12 +111,12 @@ class TestRunBlockFiltering:
+ 
+     @pytest.mark.asyncio(loop_scope="session")
+     async def test_excluded_block_id_returns_error(self):
+-        """Attempting to execute SmartDecisionMakerBlock returns error."""
++        """Attempting to execute OrchestratorBlock returns error."""
+         session = make_session(user_id=_TEST_USER_ID)
+ 
+-        smart_decision_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
++        orchestrator_id = "3b191d9f-356f-482d-8238-ba04b6d18381"
+         smart_block = make_mock_block(
+-            smart_decision_id, "Smart Decision Maker", BlockType.STANDARD
++            orchestrator_id, "Orchestrator", BlockType.STANDARD
+         )
+ 
+         with patch(
+@@ -127,7 +127,7 @@ class TestRunBlockFiltering:
+             response = await tool._execute(
+                 user_id=_TEST_USER_ID,
+                 session=session,
+-                block_id=smart_decision_id,
++                block_id=orchestrator_id,
+                 input_data={},
+             )
+ 
+diff --git a/autogpt_platform/backend/backend/data/block_cost_config.py b/autogpt_platform/backend/backend/data/block_cost_config.py
+index ec369537c..f9e49efc9 100644
+--- a/autogpt_platform/backend/backend/data/block_cost_config.py
++++ b/autogpt_platform/backend/backend/data/block_cost_config.py
+@@ -32,9 +32,9 @@ from backend.blocks.llm import (
+     AITextSummarizerBlock,
+     LlmModel,
+ )
++from backend.blocks.orchestrator import OrchestratorBlock
+ from backend.blocks.replicate.flux_advanced import ReplicateFluxAdvancedModelBlock
+ from backend.blocks.replicate.replicate_block import ReplicateModelBlock
+-from backend.blocks.smart_decision_maker import SmartDecisionMakerBlock
+ from backend.blocks.talking_head import CreateTalkingAvatarVideoBlock
+ from backend.blocks.text_to_speech_block import UnrealTextToSpeechBlock
+ from backend.blocks.video.narration import VideoNarrationBlock
+@@ -548,7 +548,6 @@ BLOCK_COSTS: dict[Type[Block], list[BlockCost]] = {
+             },
+         )
+     ],
+-    SmartDecisionMakerBlock: LLM_COST,
+     SearchOrganizationsBlock: [
+         BlockCost(
+             cost_amount=2,
+@@ -700,6 +699,7 @@ BLOCK_COSTS: dict[Type[Block], list[BlockCost]] = {
+             },
+         ),
+     ],
++    OrchestratorBlock: LLM_COST,
+     VideoNarrationBlock: [
+         BlockCost(
+             cost_amount=5,  # ElevenLabs TTS cost
+diff --git a/autogpt_platform/backend/backend/data/execution_outputs_test.py b/autogpt_platform/backend/backend/data/execution_outputs_test.py
+index cb8a1e87e..3f9e4311c 100644
+--- a/autogpt_platform/backend/backend/data/execution_outputs_test.py
++++ b/autogpt_platform/backend/backend/data/execution_outputs_test.py
+@@ -7,7 +7,7 @@ the function returns plain values instead of lists, it causes:
+     1 validation error for dict[str,list[any]] response
+     Input should be a valid list [type=list_type, input_value='', input_type=str]
+ 
+-This breaks SmartDecisionMakerBlock agent mode tool execution.
++This breaks OrchestratorBlock agent mode tool execution.
+ """
+ 
+ from unittest.mock import AsyncMock, MagicMock, patch
+diff --git a/autogpt_platform/backend/backend/data/graph.py b/autogpt_platform/backend/backend/data/graph.py
+index 4d85ba69b..4c685b7d1 100644
+--- a/autogpt_platform/backend/backend/data/graph.py
++++ b/autogpt_platform/backend/backend/data/graph.py
+@@ -737,7 +737,7 @@ class GraphModel(Graph, GraphMeta):
+         # Collect errors per node
+         node_errors: dict[str, dict[str, str]] = defaultdict(dict)
+ 
+-        # Validate smart decision maker nodes
++        # Validate tool orchestrator nodes
+         nodes_block = {
+             node.id: block
+             for node in graph.nodes
+diff --git a/autogpt_platform/backend/backend/util/prompt_test.py b/autogpt_platform/backend/backend/util/prompt_test.py
+index 2d4bf090b..eb4561b29 100644
+--- a/autogpt_platform/backend/backend/util/prompt_test.py
++++ b/autogpt_platform/backend/backend/util/prompt_test.py
+@@ -612,7 +612,7 @@ class TestEnsureToolPairsIntact:
+     # ---- Mixed/Edge Case Tests ----
+ 
+     def test_anthropic_with_type_message_field(self):
+-        """Test Anthropic format with 'type': 'message' field (smart_decision_maker style)."""
++        """Test Anthropic format with 'type': 'message' field (orchestrator style)."""
+         all_msgs = [
+             {"role": "system", "content": "You are helpful."},
+             {
+@@ -628,7 +628,7 @@ class TestEnsureToolPairsIntact:
+             },
+             {
+                 "role": "user",
+-                "type": "message",  # Extra field from smart_decision_maker
++                "type": "message",  # Extra field from orchestrator
+                 "content": [
+                     {
+                         "type": "tool_result",
+diff --git a/autogpt_platform/backend/test/agent_generator/test_smart_decision_maker.py b/autogpt_platform/backend/test/agent_generator/test_orchestrator.py
+similarity index 87%
+rename from autogpt_platform/backend/test/agent_generator/test_smart_decision_maker.py
+rename to autogpt_platform/backend/test/agent_generator/test_orchestrator.py
+index f5df29e06..0d4d39c33 100644
+--- a/autogpt_platform/backend/test/agent_generator/test_smart_decision_maker.py
++++ b/autogpt_platform/backend/test/agent_generator/test_orchestrator.py
+@@ -1,10 +1,10 @@
+ """
+-Tests for SmartDecisionMakerBlock support in agent generator.
++Tests for OrchestratorBlock support in agent generator.
+ 
+ Covers:
+-- AgentFixer.fix_smart_decision_maker_blocks()
+-- AgentValidator.validate_smart_decision_maker_blocks()
+-- End-to-end fix → validate → pipeline for SmartDecisionMaker agents
++- AgentFixer.fix_orchestrator_blocks()
++- AgentValidator.validate_orchestrator_blocks()
++- End-to-end fix → validate → pipeline for Orchestrator agents
+ """
+ 
+ import uuid
+@@ -14,7 +14,7 @@ from backend.copilot.tools.agent_generator.helpers import (
+     AGENT_EXECUTOR_BLOCK_ID,
+     AGENT_INPUT_BLOCK_ID,
+     AGENT_OUTPUT_BLOCK_ID,
+-    SMART_DECISION_MAKER_BLOCK_ID,
++    TOOL_ORCHESTRATOR_BLOCK_ID,
+ )
+ from backend.copilot.tools.agent_generator.validator import AgentValidator
+ 
+@@ -28,10 +28,10 @@ def _make_sdm_node(
+     input_default: dict | None = None,
+     metadata: dict | None = None,
+ ) -> dict:
+-    """Create a SmartDecisionMakerBlock node dict."""
++    """Create a OrchestratorBlock node dict."""
+     return {
+         "id": node_id or _uid(),
+-        "block_id": SMART_DECISION_MAKER_BLOCK_ID,
++        "block_id": TOOL_ORCHESTRATOR_BLOCK_ID,
+         "input_default": input_default or {},
+         "metadata": metadata or {"position": {"x": 0, "y": 0}},
+     }
+@@ -125,15 +125,15 @@ def _make_orchestrator_agent() -> dict:
+ # ---------------------------------------------------------------------------
+ 
+ 
+-class TestFixSmartDecisionMakerBlocks:
+-    """Tests for AgentFixer.fix_smart_decision_maker_blocks()."""
++class TestFixOrchestratorBlocks:
++    """Tests for AgentFixer.fix_orchestrator_blocks()."""
+ 
+     def test_fills_defaults_when_missing(self):
+         """All agent-mode defaults are populated for a bare SDM node."""
+         fixer = AgentFixer()
+         agent = {"nodes": [_make_sdm_node()], "links": []}
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         defaults = result["nodes"][0]["input_default"]
+         assert defaults["agent_mode_max_iterations"] == 10
+@@ -159,7 +159,7 @@ class TestFixSmartDecisionMakerBlocks:
+             "links": [],
+         }
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         defaults = result["nodes"][0]["input_default"]
+         assert defaults["agent_mode_max_iterations"] == 5
+@@ -182,7 +182,7 @@ class TestFixSmartDecisionMakerBlocks:
+             "links": [],
+         }
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         defaults = result["nodes"][0]["input_default"]
+         assert defaults["agent_mode_max_iterations"] == 10  # kept
+@@ -192,7 +192,7 @@ class TestFixSmartDecisionMakerBlocks:
+         assert len(fixer.fixes_applied) == 3
+ 
+     def test_skips_non_sdm_nodes(self):
+-        """Non-SmartDecisionMaker nodes are untouched."""
++        """Non-Orchestrator nodes are untouched."""
+         fixer = AgentFixer()
+         other_node = {
+             "id": _uid(),
+@@ -202,7 +202,7 @@ class TestFixSmartDecisionMakerBlocks:
+         }
+         agent = {"nodes": [other_node], "links": []}
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         assert "agent_mode_max_iterations" not in result["nodes"][0]["input_default"]
+         assert len(fixer.fixes_applied) == 0
+@@ -212,12 +212,12 @@ class TestFixSmartDecisionMakerBlocks:
+         fixer = AgentFixer()
+         node = {
+             "id": _uid(),
+-            "block_id": SMART_DECISION_MAKER_BLOCK_ID,
++            "block_id": TOOL_ORCHESTRATOR_BLOCK_ID,
+             "metadata": {},
+         }
+         agent = {"nodes": [node], "links": []}
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         assert "input_default" in result["nodes"][0]
+         assert result["nodes"][0]["input_default"]["agent_mode_max_iterations"] == 10
+@@ -227,13 +227,13 @@ class TestFixSmartDecisionMakerBlocks:
+         fixer = AgentFixer()
+         node = {
+             "id": _uid(),
+-            "block_id": SMART_DECISION_MAKER_BLOCK_ID,
++            "block_id": TOOL_ORCHESTRATOR_BLOCK_ID,
+             "input_default": None,
+             "metadata": {},
+         }
+         agent = {"nodes": [node], "links": []}
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         assert isinstance(result["nodes"][0]["input_default"], dict)
+         assert result["nodes"][0]["input_default"]["agent_mode_max_iterations"] == 10
+@@ -255,7 +255,7 @@ class TestFixSmartDecisionMakerBlocks:
+             "links": [],
+         }
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         defaults = result["nodes"][0]["input_default"]
+         assert defaults["agent_mode_max_iterations"] == 10  # None → default
+@@ -275,7 +275,7 @@ class TestFixSmartDecisionMakerBlocks:
+             "links": [],
+         }
+ 
+-        result = fixer.fix_smart_decision_maker_blocks(agent)
++        result = fixer.fix_orchestrator_blocks(agent)
+ 
+         # First node: 3 defaults filled (agent_mode was already set)
+         assert result["nodes"][0]["input_default"]["agent_mode_max_iterations"] == 3
+@@ -284,7 +284,7 @@ class TestFixSmartDecisionMakerBlocks:
+         assert len(fixer.fixes_applied) == 7  # 3 + 4
+ 
+     def test_registered_in_apply_all_fixes(self):
+-        """fix_smart_decision_maker_blocks runs as part of apply_all_fixes."""
++        """fix_orchestrator_blocks runs as part of apply_all_fixes."""
+         fixer = AgentFixer()
+         agent = {
+             "nodes": [_make_sdm_node()],
+@@ -295,7 +295,7 @@ class TestFixSmartDecisionMakerBlocks:
+ 
+         defaults = result["nodes"][0]["input_default"]
+         assert defaults["agent_mode_max_iterations"] == 10
+-        assert any("SmartDecisionMakerBlock" in fix for fix in fixer.fixes_applied)
++        assert any("OrchestratorBlock" in fix for fix in fixer.fixes_applied)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -303,15 +303,15 @@ class TestFixSmartDecisionMakerBlocks:
+ # ---------------------------------------------------------------------------
+ 
+ 
+-class TestValidateSmartDecisionMakerBlocks:
+-    """Tests for AgentValidator.validate_smart_decision_maker_blocks()."""
++class TestValidateOrchestratorBlocks:
++    """Tests for AgentValidator.validate_orchestrator_blocks()."""
+ 
+     def test_valid_sdm_with_tools(self):
+         """SDM with downstream tool links passes validation."""
+         validator = AgentValidator()
+         agent = _make_orchestrator_agent()
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is True
+         assert len(validator.errors) == 0
+@@ -325,7 +325,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [],  # no tool links
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert len(validator.errors) == 1
+@@ -344,20 +344,20 @@ class TestValidateSmartDecisionMakerBlocks:
+             ],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert len(validator.errors) == 1
+ 
+     def test_no_sdm_nodes_passes(self):
+-        """Agent without SmartDecisionMaker nodes passes trivially."""
++        """Agent without Orchestrator nodes passes trivially."""
+         validator = AgentValidator()
+         agent = {
+             "nodes": [_make_input_node(), _make_output_node()],
+             "links": [],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is True
+         assert len(validator.errors) == 0
+@@ -373,7 +373,7 @@ class TestValidateSmartDecisionMakerBlocks:
+         )
+         agent = {"nodes": [sdm], "links": []}
+ 
+-        validator.validate_smart_decision_maker_blocks(agent)
++        validator.validate_orchestrator_blocks(agent)
+ 
+         assert "My Orchestrator" in validator.errors[0]
+ 
+@@ -392,7 +392,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             ],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert len(validator.errors) == 1
+@@ -408,7 +408,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [_link(sdm["id"], "tools", tool["id"], "query")],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert any("agent_mode_max_iterations=0" in e for e in validator.errors)
+@@ -423,7 +423,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [_link(sdm["id"], "tools", tool["id"], "query")],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is True
+         assert len(validator.errors) == 0
+@@ -438,7 +438,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [_link(sdm["id"], "tools", tool["id"], "query")],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert any("unusually high" in e for e in validator.errors)
+@@ -453,7 +453,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [_link(sdm["id"], "tools", tool["id"], "query")],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert any("non-integer" in e for e in validator.errors)
+@@ -468,7 +468,7 @@ class TestValidateSmartDecisionMakerBlocks:
+             "links": [_link(sdm["id"], "tools", tool["id"], "query")],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert any("invalid" in e and "-5" in e for e in validator.errors)
+@@ -488,14 +488,14 @@ class TestValidateSmartDecisionMakerBlocks:
+             ],
+         }
+ 
+-        result = validator.validate_smart_decision_maker_blocks(agent)
++        result = validator.validate_orchestrator_blocks(agent)
+ 
+         assert result is False
+         assert len(validator.errors) == 1
+         assert "no downstream tool blocks" in validator.errors[0]
+ 
+     def test_registered_in_validate(self):
+-        """validate_smart_decision_maker_blocks runs as part of validate()."""
++        """validate_orchestrator_blocks runs as part of validate()."""
+         validator = AgentValidator()
+         sdm = _make_sdm_node()
+         agent = {
+@@ -511,8 +511,8 @@ class TestValidateSmartDecisionMakerBlocks:
+         # Build a minimal blocks list with the SDM block info
+         blocks = [
+             {
+-                "id": SMART_DECISION_MAKER_BLOCK_ID,
+-                "name": "SmartDecisionMakerBlock",
++                "id": TOOL_ORCHESTRATOR_BLOCK_ID,
++                "name": "OrchestratorBlock",
+                 "inputSchema": {"properties": {"prompt": {"type": "string"}}},
+                 "outputSchema": {
+                     "properties": {
+@@ -557,7 +557,7 @@ class TestValidateSmartDecisionMakerBlocks:
+ # ---------------------------------------------------------------------------
+ 
+ 
+-class TestSmartDecisionMakerE2EPipeline:
++class TestOrchestratorE2EPipeline:
+     """End-to-end tests: build agent JSON → fix → validate."""
+ 
+     def test_orchestrator_agent_fix_then_validate(self):
+@@ -570,7 +570,7 @@ class TestSmartDecisionMakerE2EPipeline:
+ 
+         # Verify defaults were applied
+         sdm_nodes = [
+-            n for n in fixed["nodes"] if n["block_id"] == SMART_DECISION_MAKER_BLOCK_ID
++            n for n in fixed["nodes"] if n["block_id"] == TOOL_ORCHESTRATOR_BLOCK_ID
+         ]
+         assert len(sdm_nodes) == 1
+         assert sdm_nodes[0]["input_default"]["agent_mode_max_iterations"] == 10
+@@ -578,7 +578,7 @@ class TestSmartDecisionMakerE2EPipeline:
+ 
+         # Validate (standalone SDM check)
+         validator = AgentValidator()
+-        assert validator.validate_smart_decision_maker_blocks(fixed) is True
++        assert validator.validate_orchestrator_blocks(fixed) is True
+ 
+     def test_bare_sdm_no_tools_fix_then_validate(self):
+         """SDM without tools: fixer fills defaults, validator catches error."""
+@@ -606,7 +606,7 @@ class TestSmartDecisionMakerE2EPipeline:
+ 
+         # Validate catches missing tools
+         validator = AgentValidator()
+-        assert validator.validate_smart_decision_maker_blocks(fixed) is False
++        assert validator.validate_orchestrator_blocks(fixed) is False
+         assert any("no downstream tool blocks" in e for e in validator.errors)
+ 
+     def test_sdm_with_user_set_bounded_iterations(self):
+@@ -614,7 +614,7 @@ class TestSmartDecisionMakerE2EPipeline:
+         agent = _make_orchestrator_agent()
+         # Simulate user setting bounded iterations
+         for node in agent["nodes"]:
+-            if node["block_id"] == SMART_DECISION_MAKER_BLOCK_ID:
++            if node["block_id"] == TOOL_ORCHESTRATOR_BLOCK_ID:
+                 node["input_default"]["agent_mode_max_iterations"] = 5
+                 node["input_default"]["sys_prompt"] = "You are a helpful orchestrator"
+ 
+@@ -622,7 +622,7 @@ class TestSmartDecisionMakerE2EPipeline:
+         fixed = fixer.apply_all_fixes(agent)
+ 
+         sdm = next(
+-            n for n in fixed["nodes"] if n["block_id"] == SMART_DECISION_MAKER_BLOCK_ID
++            n for n in fixed["nodes"] if n["block_id"] == TOOL_ORCHESTRATOR_BLOCK_ID
+         )
+         assert sdm["input_default"]["agent_mode_max_iterations"] == 5
+         assert sdm["input_default"]["sys_prompt"] == "You are a helpful orchestrator"
+@@ -638,8 +638,8 @@ class TestSmartDecisionMakerE2EPipeline:
+ 
+         blocks = [
+             {
+-                "id": SMART_DECISION_MAKER_BLOCK_ID,
+-                "name": "SmartDecisionMakerBlock",
++                "id": TOOL_ORCHESTRATOR_BLOCK_ID,
++                "name": "OrchestratorBlock",
+                 "inputSchema": {
+                     "properties": {
+                         "prompt": {"type": "string"},
+@@ -709,5 +709,5 @@ class TestSmartDecisionMakerE2EPipeline:
+         assert is_valid, f"Validation failed: {error_msg}"
+ 
+         # SDM-specific validation should pass (has tool links)
+-        sdm_errors = [e for e in validator.errors if "SmartDecisionMakerBlock" in e]
++        sdm_errors = [e for e in validator.errors if "OrchestratorBlock" in e]
+         assert len(sdm_errors) == 0, f"Unexpected SDM errors: {sdm_errors}"
+diff --git a/autogpt_platform/frontend/src/lib/autogpt-server-api/types.ts b/autogpt_platform/frontend/src/lib/autogpt-server-api/types.ts
+index 959f14184..650631a15 100644
+--- a/autogpt_platform/frontend/src/lib/autogpt-server-api/types.ts
++++ b/autogpt_platform/frontend/src/lib/autogpt-server-api/types.ts
+@@ -743,7 +743,7 @@ export enum BlockUIType {
+ export enum SpecialBlockID {
+   AGENT = "e189baac-8c20-45a1-94a7-55177ea42565",
+   MCP_TOOL = "a0a4b1c2-d3e4-4f56-a7b8-c9d0e1f2a3b4",
+-  SMART_DECISION = "3b191d9f-356f-482d-8238-ba04b6d18381",
++  TOOL_ORCHESTRATOR = "3b191d9f-356f-482d-8238-ba04b6d18381",
+   OUTPUT = "363ae599-353e-4804-937e-b2ee3cef3da4",
+ }
+ 
+diff --git a/docs/integrations/README.md b/docs/integrations/README.md
+index 9fd90e844..2d2d74f42 100644
+--- a/docs/integrations/README.md
++++ b/docs/integrations/README.md
+@@ -230,10 +230,10 @@ Below is a comprehensive list of all available blocks, categorized by their prim
+ | [Ideogram Model](block-integrations/llm.md#ideogram-model) | This block runs Ideogram models with both simple and advanced settings |
+ | [Jina Chunking](block-integrations/jina/chunking.md#jina-chunking) | Chunks texts using Jina AI's segmentation service |
+ | [Jina Embedding](block-integrations/jina/embeddings.md#jina-embedding) | Generates embeddings using Jina AI |
++| [Orchestrator](block-integrations/llm.md#orchestrator) | Uses AI to intelligently decide what tool to use |
+ | [Perplexity](block-integrations/llm.md#perplexity) | Query Perplexity's sonar models with real-time web search capabilities and receive annotated responses with source citations |
+ | [Replicate Flux Advanced Model](block-integrations/replicate/flux_advanced.md#replicate-flux-advanced-model) | This block runs Flux models on Replicate with advanced settings |
+ | [Replicate Model](block-integrations/replicate/replicate_block.md#replicate-model) | Run Replicate models synchronously |
+-| [Smart Decision Maker](block-integrations/llm.md#smart-decision-maker) | Uses AI to intelligently decide what tool to use |
+ | [Stagehand Act](block-integrations/stagehand/blocks.md#stagehand-act) | Interact with a web page by performing actions on a web page |
+ | [Stagehand Extract](block-integrations/stagehand/blocks.md#stagehand-extract) | Extract structured data from a webpage |
+ | [Stagehand Observe](block-integrations/stagehand/blocks.md#stagehand-observe) | Find suggested actions for your workflows |
+diff --git a/docs/integrations/block-integrations/llm.md b/docs/integrations/block-integrations/llm.md
+index 8f62223d6..4fb2f6446 100644
+--- a/docs/integrations/block-integrations/llm.md
++++ b/docs/integrations/block-integrations/llm.md
+@@ -706,91 +706,85 @@ Advanced options include upscaling, custom color palettes, and negative prompts
+ 
+ ---
+ 
+-## Perplexity
++## Orchestrator
+ 
+ ### What it is
+-Query Perplexity's sonar models with real-time web search capabilities and receive annotated responses with source citations.
++Uses AI to intelligently decide what tool to use.
+ 
+ ### How it works
+ <!-- MANUAL: how_it_works -->
+-This block queries Perplexity's sonar models which combine LLM capabilities with real-time web search. Responses include source citations as annotations, providing verifiable references for the information.
+-
+-Choose from different sonar model variants including deep-research for comprehensive analysis. The block returns both the response text and structured citation data.
++_Add technical explanation here._
+ <!-- END MANUAL -->
+ 
+ ### Inputs
+ 
+ | Input | Description | Type | Required |
+ |-------|-------------|------|----------|
+-| prompt | The query to send to the Perplexity model. | str | Yes |
+-| model | The Perplexity sonar model to use. | "perplexity/sonar" \| "perplexity/sonar-pro" \| "perplexity/sonar-deep-research" | No |
+-| system_prompt | Optional system prompt to provide context to the model. | str | No |
+-| max_tokens | The maximum number of tokens to generate. | int | No |
++| prompt | The prompt to send to the language model. | str | Yes |
++| model | The language model to use for answering the prompt. | "o3-mini" \| "o3-2025-04-16" \| "o1" \| "o1-mini" \| "gpt-5.2-2025-12-11" \| "gpt-5.1-2025-11-13" \| "gpt-5-2025-08-07" \| "gpt-5-mini-2025-08-07" \| "gpt-5-nano-2025-08-07" \| "gpt-5-chat-latest" \| "gpt-4.1-2025-04-14" \| "gpt-4.1-mini-2025-04-14" \| "gpt-4o-mini" \| "gpt-4o" \| "gpt-4-turbo" \| "claude-opus-4-1-20250805" \| "claude-opus-4-20250514" \| "claude-sonnet-4-20250514" \| "claude-opus-4-5-20251101" \| "claude-sonnet-4-5-20250929" \| "claude-haiku-4-5-20251001" \| "claude-opus-4-6" \| "claude-sonnet-4-6" \| "claude-3-haiku-20240307" \| "Qwen/Qwen2.5-72B-Instruct-Turbo" \| "nvidia/llama-3.1-nemotron-70b-instruct" \| "meta-llama/Llama-3.3-70B-Instruct-Turbo" \| "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo" \| "meta-llama/Llama-3.2-3B-Instruct-Turbo" \| "llama-3.3-70b-versatile" \| "llama-3.1-8b-instant" \| "llama3.3" \| "llama3.2" \| "llama3" \| "llama3.1:405b" \| "dolphin-mistral:latest" \| "openai/gpt-oss-120b" \| "openai/gpt-oss-20b" \| "google/gemini-2.5-pro-preview-03-25" \| "google/gemini-2.5-pro" \| "google/gemini-3.1-pro-preview" \| "google/gemini-3-flash-preview" \| "google/gemini-2.5-flash" \| "google/gemini-2.0-flash-001" \| "google/gemini-3.1-flash-lite-preview" \| "google/gemini-2.5-flash-lite-preview-06-17" \| "google/gemini-2.0-flash-lite-001" \| "mistralai/mistral-nemo" \| "mistralai/mistral-large-2512" \| "mistralai/mistral-medium-3.1" \| "mistralai/mistral-small-3.2-24b-instruct" \| "mistralai/codestral-2508" \| "cohere/command-r-08-2024" \| "cohere/command-r-plus-08-2024" \| "cohere/command-a-03-2025" \| "cohere/command-a-translate-08-2025" \| "cohere/command-a-reasoning-08-2025" \| "cohere/command-a-vision-07-2025" \| "deepseek/deepseek-chat" \| "deepseek/deepseek-r1-0528" \| "perplexity/sonar" \| "perplexity/sonar-pro" \| "perplexity/sonar-reasoning-pro" \| "perplexity/sonar-deep-research" \| "nousresearch/hermes-3-llama-3.1-405b" \| "nousresearch/hermes-3-llama-3.1-70b" \| "amazon/nova-lite-v1" \| "amazon/nova-micro-v1" \| "amazon/nova-pro-v1" \| "microsoft/wizardlm-2-8x22b" \| "microsoft/phi-4" \| "gryphe/mythomax-l2-13b" \| "meta-llama/llama-4-scout" \| "meta-llama/llama-4-maverick" \| "x-ai/grok-3" \| "x-ai/grok-4" \| "x-ai/grok-4-fast" \| "x-ai/grok-4.1-fast" \| "x-ai/grok-code-fast-1" \| "moonshotai/kimi-k2" \| "qwen/qwen3-235b-a22b-thinking-2507" \| "qwen/qwen3-coder" \| "Llama-4-Scout-17B-16E-Instruct-FP8" \| "Llama-4-Maverick-17B-128E-Instruct-FP8" \| "Llama-3.3-8B-Instruct" \| "Llama-3.3-70B-Instruct" \| "v0-1.5-md" \| "v0-1.5-lg" \| "v0-1.0-md" | No |
++| multiple_tool_calls | Whether to allow multiple tool calls in a single response. | bool | No |
++| sys_prompt | The system prompt to provide additional context to the model. | str | No |
++| conversation_history | The conversation history to provide context for the prompt. | List[Dict[str, Any]] | No |
++| last_tool_output | The output of the last tool that was called. | Last Tool Output | No |
++| retry | Number of times to retry the LLM call if the response does not match the expected format. | int | No |
++| prompt_values | Values used to fill in the prompt. The values can be used in the prompt by putting them in a double curly braces, e.g. {{variable_name}}. | Dict[str, str] | No |
++| max_tokens | The maximum number of tokens to generate in the chat completion. | int | No |
++| ollama_host | Ollama host for local  models | str | No |
++| agent_mode_max_iterations | Maximum iterations for agent mode. 0 = traditional mode (single LLM call, yield tool calls for external execution), -1 = infinite agent mode (loop until finished), 1+ = agent mode with max iterations limit. | int | No |
++| conversation_compaction | Automatically compact the context window once it hits the limit | bool | No |
+ 
+ ### Outputs
+ 
+ | Output | Description | Type |
+ |--------|-------------|------|
+ | error | Error message if the operation failed | str |
+-| response | The response from the Perplexity model. | str |
+-| annotations | List of URL citations and annotations from the response. | List[Dict[str, Any]] |
++| tools | The tools that are available to use. | Tools |
++| finished | The finished message to display to the user. | str |
++| conversations | The conversation history to provide context for the prompt. | List[Any] |
+ 
+ ### Possible use case
+ <!-- MANUAL: use_case -->
+-**Research Automation**: Get answers to questions with verifiable sources for fact-checking.
+-
+-**Current Events**: Query real-time information that LLMs with static training data can't provide.
+-
+-**Competitive Intelligence**: Research companies, products, or markets with cited sources.
++_Add practical use case examples here._
+ <!-- END MANUAL -->
+ 
+ ---
+ 
+-## Smart Decision Maker
++## Perplexity
+ 
+ ### What it is
+-Uses AI to intelligently decide what tool to use.
++Query Perplexity's sonar models with real-time web search capabilities and receive annotated responses with source citations.
+ 
+ ### How it works
+ <!-- MANUAL: how_it_works -->
+-This block enables agentic behavior by letting an LLM decide which tools to use based on the prompt. Connect tool outputs to feed back results, creating autonomous reasoning loops.
++This block queries Perplexity's sonar models which combine LLM capabilities with real-time web search. Responses include source citations as annotations, providing verifiable references for the information.
+ 
+-Configure agent_mode_max_iterations to control loop behavior: 0 for single decisions, -1 for infinite looping, or a positive number for max iterations. The block outputs tool calls or a finished message.
++Choose from different sonar model variants including deep-research for comprehensive analysis. The block returns both the response text and structured citation data.
+ <!-- END MANUAL -->
+ 
+ ### Inputs
+ 
+ | Input | Description | Type | Required |
+ |-------|-------------|------|----------|
+-| prompt | The prompt to send to the language model. | str | Yes |
+-| model | The language model to use for answering the prompt. | "o3-mini" \| "o3-2025-04-16" \| "o1" \| "o1-mini" \| "gpt-5.2-2025-12-11" \| "gpt-5.1-2025-11-13" \| "gpt-5-2025-08-07" \| "gpt-5-mini-2025-08-07" \| "gpt-5-nano-2025-08-07" \| "gpt-5-chat-latest" \| "gpt-4.1-2025-04-14" \| "gpt-4.1-mini-2025-04-14" \| "gpt-4o-mini" \| "gpt-4o" \| "gpt-4-turbo" \| "claude-opus-4-1-20250805" \| "claude-opus-4-20250514" \| "claude-sonnet-4-20250514" \| "claude-opus-4-5-20251101" \| "claude-sonnet-4-5-20250929" \| "claude-haiku-4-5-20251001" \| "claude-opus-4-6" \| "claude-sonnet-4-6" \| "claude-3-haiku-20240307" \| "Qwen/Qwen2.5-72B-Instruct-Turbo" \| "nvidia/llama-3.1-nemotron-70b-instruct" \| "meta-llama/Llama-3.3-70B-Instruct-Turbo" \| "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo" \| "meta-llama/Llama-3.2-3B-Instruct-Turbo" \| "llama-3.3-70b-versatile" \| "llama-3.1-8b-instant" \| "llama3.3" \| "llama3.2" \| "llama3" \| "llama3.1:405b" \| "dolphin-mistral:latest" \| "openai/gpt-oss-120b" \| "openai/gpt-oss-20b" \| "google/gemini-2.5-pro-preview-03-25" \| "google/gemini-2.5-pro" \| "google/gemini-3.1-pro-preview" \| "google/gemini-3-flash-preview" \| "google/gemini-2.5-flash" \| "google/gemini-2.0-flash-001" \| "google/gemini-3.1-flash-lite-preview" \| "google/gemini-2.5-flash-lite-preview-06-17" \| "google/gemini-2.0-flash-lite-001" \| "mistralai/mistral-nemo" \| "mistralai/mistral-large-2512" \| "mistralai/mistral-medium-3.1" \| "mistralai/mistral-small-3.2-24b-instruct" \| "mistralai/codestral-2508" \| "cohere/command-r-08-2024" \| "cohere/command-r-plus-08-2024" \| "cohere/command-a-03-2025" \| "cohere/command-a-translate-08-2025" \| "cohere/command-a-reasoning-08-2025" \| "cohere/command-a-vision-07-2025" \| "deepseek/deepseek-chat" \| "deepseek/deepseek-r1-0528" \| "perplexity/sonar" \| "perplexity/sonar-pro" \| "perplexity/sonar-reasoning-pro" \| "perplexity/sonar-deep-research" \| "nousresearch/hermes-3-llama-3.1-405b" \| "nousresearch/hermes-3-llama-3.1-70b" \| "amazon/nova-lite-v1" \| "amazon/nova-micro-v1" \| "amazon/nova-pro-v1" \| "microsoft/wizardlm-2-8x22b" \| "microsoft/phi-4" \| "gryphe/mythomax-l2-13b" \| "meta-llama/llama-4-scout" \| "meta-llama/llama-4-maverick" \| "x-ai/grok-3" \| "x-ai/grok-4" \| "x-ai/grok-4-fast" \| "x-ai/grok-4.1-fast" \| "x-ai/grok-code-fast-1" \| "moonshotai/kimi-k2" \| "qwen/qwen3-235b-a22b-thinking-2507" \| "qwen/qwen3-coder" \| "Llama-4-Scout-17B-16E-Instruct-FP8" \| "Llama-4-Maverick-17B-128E-Instruct-FP8" \| "Llama-3.3-8B-Instruct" \| "Llama-3.3-70B-Instruct" \| "v0-1.5-md" \| "v0-1.5-lg" \| "v0-1.0-md" | No |
+-| multiple_tool_calls | Whether to allow multiple tool calls in a single response. | bool | No |
+-| sys_prompt | The system prompt to provide additional context to the model. | str | No |
+-| conversation_history | The conversation history to provide context for the prompt. | List[Dict[str, Any]] | No |
+-| last_tool_output | The output of the last tool that was called. | Last Tool Output | No |
+-| retry | Number of times to retry the LLM call if the response does not match the expected format. | int | No |
+-| prompt_values | Values used to fill in the prompt. The values can be used in the prompt by putting them in a double curly braces, e.g. {{variable_name}}. | Dict[str, str] | No |
+-| max_tokens | The maximum number of tokens to generate in the chat completion. | int | No |
+-| ollama_host | Ollama host for local  models | str | No |
+-| agent_mode_max_iterations | Maximum iterations for agent mode. 0 = traditional mode (single LLM call, yield tool calls for external execution), -1 = infinite agent mode (loop until finished), 1+ = agent mode with max iterations limit. | int | No |
+-| conversation_compaction | Automatically compact the context window once it hits the limit | bool | No |
++| prompt | The query to send to the Perplexity model. | str | Yes |
++| model | The Perplexity sonar model to use. | "perplexity/sonar" \| "perplexity/sonar-pro" \| "perplexity/sonar-deep-research" | No |
++| system_prompt | Optional system prompt to provide context to the model. | str | No |
++| max_tokens | The maximum number of tokens to generate. | int | No |
+ 
+ ### Outputs
+ 
+ | Output | Description | Type |
+ |--------|-------------|------|
+ | error | Error message if the operation failed | str |
+-| tools | The tools that are available to use. | Tools |
+-| finished | The finished message to display to the user. | str |
+-| conversations | The conversation history to provide context for the prompt. | List[Any] |
++| response | The response from the Perplexity model. | str |
++| annotations | List of URL citations and annotations from the response. | List[Dict[str, Any]] |
+ 
+ ### Possible use case
+ <!-- MANUAL: use_case -->
+-**Autonomous Agents**: Build agents that can independently decide which tools to use for tasks.
++**Research Automation**: Get answers to questions with verifiable sources for fact-checking.
+ 
+-**Dynamic Workflows**: Create workflows that adapt their execution path based on AI decisions.
++**Current Events**: Query real-time information that LLMs with static training data can't provide.
+ 
+-**Multi-Tool Orchestration**: Let AI coordinate multiple tools to accomplish complex goals.
++**Competitive Intelligence**: Research companies, products, or markets with cited sources.
+ <!-- END MANUAL -->
+ 
+ ---

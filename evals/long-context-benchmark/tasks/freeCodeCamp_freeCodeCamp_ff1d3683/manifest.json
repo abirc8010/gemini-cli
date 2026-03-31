@@ -1,0 +1,9 @@
+{
+  "task_id": "freeCodeCamp_freeCodeCamp_ff1d3683",
+  "repo": "freeCodeCamp/freeCodeCamp",
+  "language": "TypeScript",
+  "base_commit": "f04c56cf3ade02eba39a41942f5241d3e4687e96",
+  "solution_commit": "ff1d3683b567933999c3c795dfb74d4a22893c16",
+  "test_cmd": "npm test",
+  "impacted_files": ["api/package.json", "pnpm-lock.yaml"]
+}

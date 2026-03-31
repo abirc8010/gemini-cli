@@ -1,0 +1,55 @@
+diff --git a/client/src/templates/Challenges/components/speaking-modal.tsx b/client/src/templates/Challenges/components/speaking-modal.tsx
+index ccd071bf80..4c028ba334 100644
+--- a/client/src/templates/Challenges/components/speaking-modal.tsx
++++ b/client/src/templates/Challenges/components/speaking-modal.tsx
+@@ -151,6 +151,7 @@ const SpeakingModal = ({
+     useState<ComparisonResult | null>(null);
+   const [hasStartedRecording, setHasStartedRecording] = useState(false);
+   const [previouslyListening, setPreviouslyListening] = useState(false);
++  const playButtonRef = useRef<HTMLButtonElement | null>(null);
+   const audioRef = useRef<HTMLAudioElement | null>(null);
+   const stopListeningTimeoutRef = useRef<
+     ReturnType<typeof setTimeout> | undefined
+@@ -311,7 +312,12 @@ const SpeakingModal = ({
+   };
+ 
+   return (
+-    <Modal onClose={closeSpeakingModal} open={isSpeakingModalOpen} size='large'>
++    <Modal
++      onClose={closeSpeakingModal}
++      open={isSpeakingModalOpen}
++      size='large'
++      initialFocus={playButtonRef}
++    >
+       <Modal.Header closeButtonClassNames='close'>
+         {t('speaking-modal.heading')}
+       </Modal.Header>
+@@ -323,6 +329,7 @@ const SpeakingModal = ({
+             {sentence}
+           </p>
+           <Button
++            ref={playButtonRef}
+             size='medium'
+             onClick={() => void handlePlay()}
+             aria-describedby='speaking-sentence'
+diff --git a/e2e/multiple-choice-question-challenge.spec.ts b/e2e/multiple-choice-question-challenge.spec.ts
+index 1f5e11ebdb..3cc6117afb 100644
+--- a/e2e/multiple-choice-question-challenge.spec.ts
++++ b/e2e/multiple-choice-question-challenge.spec.ts
+@@ -47,11 +47,11 @@ test.describe('Multiple Choice Question Challenge - With Speaking Modal', () =>
+ 
+     await expect(page.getByRole('dialog')).toBeVisible();
+ 
+-    await expect(
+-      page.getByRole('button', {
+-        name: translations['speaking-modal']['play']
+-      })
+-    ).toBeVisible();
++    const playButton = page.getByRole('button', {
++      name: translations['speaking-modal']['play']
++    });
++    await expect(playButton).toBeVisible();
++    await expect(playButton).toBeFocused(); // The button is focused by default
+     await expect(
+       page.getByRole('button', {
+         name: translations['speaking-modal']['record']

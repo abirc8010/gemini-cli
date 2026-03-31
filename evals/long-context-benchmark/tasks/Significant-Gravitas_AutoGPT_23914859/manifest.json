@@ -1,0 +1,18 @@
+{
+  "task_id": "Significant-Gravitas_AutoGPT_23914859",
+  "repo": "Significant-Gravitas/AutoGPT",
+  "language": "Python",
+  "base_commit": "0076ad2a1a4de990e02f6af9832c1b893697b971",
+  "solution_commit": "239148596c4782e5d5fc0aae1f31a2d506f5ffcb",
+  "test_cmd": "python -m unittest discover",
+  "impacted_files": [
+    "autogpt_platform/backend/backend/api/external/v1/integrations.py",
+    "autogpt_platform/backend/backend/api/features/integrations/conftest.py",
+    "autogpt_platform/backend/backend/api/features/integrations/router.py",
+    "autogpt_platform/backend/backend/api/features/integrations/router_test.py",
+    "autogpt_platform/backend/backend/api/rest_api.py",
+    "autogpt_platform/backend/backend/data/model.py",
+    "autogpt_platform/backend/backend/sdk/registry.py",
+    "autogpt_platform/frontend/src/app/api/openapi.json"
+  ]
+}
